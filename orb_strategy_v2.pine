@@ -243,6 +243,8 @@ var string s2_id      = ""
 // ORB visual objects (persist for box extending)
 var box  orb_box_obj  = na
 var line orb_mid_line = na
+var line bos_line_long  = na
+var line bos_line_short = na
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  SESSION RESET  (18:00 ET — futures new session)
@@ -267,6 +269,8 @@ if new_session
     swing_low        := na
     bos_lvl_long     := na
     bos_lvl_short    := na
+    bos_line_long    := na
+    bos_line_short   := na
     entry_count      := 0
     s1_entry         := na
     s1_sl            := na
@@ -395,8 +399,18 @@ if orb_set and not is_orb_bar
 
 if brk_valid_long  and pull_long  > 0 and pivot_h
     bos_lvl_long  := high[1]
+    bos_line_long := line.new(bar_index, high[1], bar_index + 1, high[1],
+        color=color.orange, style=line.style_dashed, width=1)
 if brk_valid_short and pull_short > 0 and pivot_l
-    bos_lvl_short := low[1]
+    bos_lvl_short  := low[1]
+    bos_line_short := line.new(bar_index, low[1], bar_index + 1, low[1],
+        color=color.orange, style=line.style_dashed, width=1)
+
+// Extend BOS lines rightward each bar until entry fires or session ends
+if not na(bos_lvl_long)  and not na(bos_line_long)
+    line.set_x2(bos_line_long,  bar_index + 1)
+if not na(bos_lvl_short) and not na(bos_line_short)
+    line.set_x2(bos_line_short, bar_index + 1)
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  BOS ENTRY TRIGGER
@@ -512,8 +526,10 @@ if pos_closed
     s2_tp         := na
     s2_be_done    := false
     s2_id         := ""
-    bos_lvl_long  := na
-    bos_lvl_short := na
+    bos_lvl_long   := na
+    bos_lvl_short  := na
+    bos_line_long  := na
+    bos_line_short := na
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ORB VISUALS  (box + midpoint, extending to i_orb_end)

@@ -154,23 +154,35 @@ float orb_low_raw  = request.security(syminfo.tickerid, "15",
 
 // Grade string from pullback depth + liquidity ("" = invalid or disabled)
 grade_str(int depth, bool liq) =>
-    string g = depth == 3 ? (liq ? "A" : "") :
-               depth == 2 ? (liq ? "B" : "2B") :
-               depth == 1 ? (liq ? "C" : "2C") : ""
-    bool en = (g == "A"  and i_grade_a)  or
-              (g == "B"  and i_grade_b)  or
-              (g == "C"  and i_grade_c)  or
-              (g == "2B" and i_grade_2b) or
-              (g == "2C" and i_grade_2c)
-    en ? g : ""
+    string _g = ""
+    if depth == 3
+        _g := liq ? "A" : ""
+    else if depth == 2
+        _g := liq ? "B" : "2B"
+    else if depth == 1
+        _g := liq ? "C" : "2C"
+    bool _ea  = _g == "A"  and i_grade_a
+    bool _eb  = _g == "B"  and i_grade_b
+    bool _ec  = _g == "C"  and i_grade_c
+    bool _e2b = _g == "2B" and i_grade_2b
+    bool _e2c = _g == "2C" and i_grade_2c
+    bool _en  = _ea or _eb or _ec or _e2b or _e2c
+    _en ? _g : ""
 
 // Color for a grade string
 grade_col(string g) =>
-    g == "A"  ? i_col_grade_a  :
-    g == "B"  ? i_col_grade_b  :
-    g == "C"  ? i_col_grade_c  :
-    g == "2B" ? i_col_grade_2b :
-    g == "2C" ? i_col_grade_2c : color.gray
+    color _c = color.gray
+    if g == "A"
+        _c := i_col_grade_a
+    else if g == "B"
+        _c := i_col_grade_b
+    else if g == "C"
+        _c := i_col_grade_c
+    else if g == "2B"
+        _c := i_col_grade_2b
+    else if g == "2C"
+        _c := i_col_grade_2c
+    _c
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  STATE VARIABLES

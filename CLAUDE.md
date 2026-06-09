@@ -154,5 +154,23 @@ The `i_commission` and `i_slippage` inputs in the script are retained as referen
 
 ## 10. File Location
 
-- Script: `orb_strategy.pine`
+- V1 Script: `orb_strategy.pine`
+- V2 Script: `orb_strategy_v2.pine`
 - GitHub repo: `orb-strategy` (private)
+
+---
+
+## 11. V2 Script Notes
+
+- Runs on **5m chart**; 15m ORB sourced via `request.security()` using `ta.valuewhen`
+- **Breakout validation**: C1 close outside ORB + clears last candle pair extreme (wick cleared); C2+ full body (open AND close) outside ORB
+- **Swing detection**: 3-bar pivot — `high[1] > high[0] and high[1] > high[2]`
+- **Pullback depth**: 1=shallow (ORB boundary), 2=mid (ORB midpoint), 3=deep (through ORB)
+- **Liquidity sweep**: price revisits last confirmed session pivot before BOS fires
+- **Setup 2A** (deep + no liquidity) = strictly invalid — `grade_str()` returns `""`, never trades
+- **Grade filter**: each grade (A/B/C/2B/2C) individually toggleable via input; all ON by default
+- **BE management**: tracks up to 2 simultaneous open entries via `s1_*` / `s2_*` vars; BE moves stop to entry at 1:1 RR
+- **Re-entry**: `pos_closed` detection resets `bos_lvl_long/short` so new pivots form fresh BOS targets; `brk_valid` and pullback depth NOT reset (breakout still valid)
+- **`pyramiding=2`** supports primary + scale-in simultaneously
+- `new_session = et_hour == 18 and et_minute == 0` — same as V1
+- Commission/slippage: set in TradingView Properties tab (same as V1)

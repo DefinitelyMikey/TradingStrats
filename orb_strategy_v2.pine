@@ -70,7 +70,10 @@ i_grade_2c = input.bool(true, "Enable Grade 2C", group="🏆 Setup Grades",
     tooltip="Shallow pullback, no liquidity sweep.")
 
 // ── Visuals ───────────────────────────────────────────────────────────────────
-i_show_swing   = input.bool(true,  "Show Swing High/Low Markers", group="👁 Visuals")
+i_show_swing      = input.bool(true,  "Show Swing High/Low Markers", group="👁 Visuals")
+i_pivot_lookback  = input.int(10, "Swing Pivot Lookback (bars each side)", minval=1, maxval=50,
+    group="👁 Visuals",
+    tooltip="Bars required on each side of a pivot to confirm a swing high/low. Higher = fewer, higher-quality swings. Default 10.")
 i_show_volume  = input.bool(false, "Show Volume Context",         group="👁 Visuals")
 i_show_vwap    = input.bool(false, "Show VWAP",                   group="👁 Visuals")
 i_show_pdhl    = input.bool(false, "Show Prior Day High/Low",     group="👁 Visuals")
@@ -291,13 +294,15 @@ if is_orb_bar and not orb_set and not na(orb_high_raw) and not na(orb_low_raw)
 //  SWING HIGH / LOW  (3-bar pivot)
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool pivot_h = high[1] > high[0] and high[1] > high[2]
-bool pivot_l = low[1]  < low[0]  and low[1]  < low[2]
+float _ph = ta.pivothigh(i_pivot_lookback, i_pivot_lookback)
+float _pl = ta.pivotlow (i_pivot_lookback, i_pivot_lookback)
+bool pivot_h = not na(_ph)
+bool pivot_l = not na(_pl)
 
 if orb_set and pivot_h
-    swing_high := high[1]
+    swing_high := _ph
 if orb_set and pivot_l
-    swing_low  := low[1]
+    swing_low  := _pl
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  BREAKOUT VALIDATION
@@ -528,11 +533,11 @@ if orb_set and not na(orb_box_obj) and et_hhmm <= i_orb_end
 float tick_off = syminfo.mintick * 8
 
 if i_show_swing and orb_set and pivot_h
-    label.new(bar_index[1], high[1] + tick_off, "▲",
+    label.new(bar_index[i_pivot_lookback], _ph + tick_off, "▲",
         style=label.style_none, textcolor=i_col_swing_h, size=size.small)
 
 if i_show_swing and orb_set and pivot_l
-    label.new(bar_index[1], low[1] - tick_off, "▼",
+    label.new(bar_index[i_pivot_lookback], _pl - tick_off, "▼",
         style=label.style_none, textcolor=i_col_swing_l, size=size.small)
 
 // ─────────────────────────────────────────────────────────────────────────────

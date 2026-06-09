@@ -71,6 +71,7 @@ i_grade_2c = input.bool(true, "Enable Grade 2C", group="🏆 Setup Grades",
 
 // ── Visuals ───────────────────────────────────────────────────────────────────
 i_show_swing      = input.bool(true,  "Show Swing High/Low Markers", group="👁 Visuals")
+i_show_grade_text = input.bool(true,  "Show Grade Text on Entry",    group="👁 Visuals")
 i_pivot_lookback  = input.int(10, "Swing Pivot Lookback (bars each side)", minval=1, maxval=50,
     group="👁 Visuals",
     tooltip="Bars required on each side of a pivot to confirm a swing high/low. Higher = fewer, higher-quality swings. Default 10.")
@@ -440,9 +441,10 @@ if buy_signal
         s2_is_long := true
         s2_id      := _id
     entry_count := entry_count + 1
-    label.new(bar_index, high + syminfo.mintick * 4, cur_grade_long,
-        style=label.style_none, color=color.new(color.black, 100),
-        textcolor=grade_col(cur_grade_long), size=size.small)
+    if i_show_grade_text
+        label.new(bar_index, high + ta.atr(14) * 2.0, cur_grade_long,
+            style=label.style_none, color=color.new(color.black, 100),
+            textcolor=grade_col(cur_grade_long), size=size.small)
 
 // ── Short entry ──────────────────────────────────────────────────────────────
 if sell_signal
@@ -467,9 +469,10 @@ if sell_signal
         s2_is_long := false
         s2_id      := _id
     entry_count := entry_count + 1
-    label.new(bar_index, low - syminfo.mintick * 4, cur_grade_short,
-        style=label.style_none, color=color.new(color.black, 100),
-        textcolor=grade_col(cur_grade_short), size=size.small)
+    if i_show_grade_text
+        label.new(bar_index, low - ta.atr(14) * 2.0, cur_grade_short,
+            style=label.style_none, color=color.new(color.black, 100),
+            textcolor=grade_col(cur_grade_short), size=size.small)
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  BREAKEVEN MANAGEMENT  (move SL to entry when 1:1 RR reached)

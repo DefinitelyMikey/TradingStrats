@@ -85,6 +85,7 @@ i_vol_lookback = input.int(20, "Volume Avg Lookback (bars)", minval=5, maxval=10
 // ── Colors ────────────────────────────────────────────────────────────────────
 i_col_orb_box  = input.color(color.new(color.blue,   80), "ORB Box",        group="🎨 Colors")
 i_col_orb_mid  = input.color(color.new(color.blue,   30), "ORB Midpoint",   group="🎨 Colors")
+i_col_bos_line = input.color(color.orange,                 "BOS Level Line",  group="🎨 Colors")
 i_col_swing_h  = input.color(color.new(color.lime,    0), "Swing High",     group="🎨 Colors")
 i_col_swing_l  = input.color(color.new(color.red,     0), "Swing Low",      group="🎨 Colors")
 i_col_grade_a  = input.color(color.new(color.green,   0), "Grade A Label",  group="🎨 Colors")
@@ -400,11 +401,11 @@ if orb_set and not is_orb_bar
 if brk_valid_long  and pull_long  > 0 and pivot_h
     bos_lvl_long  := high[1]
     bos_line_long := line.new(bar_index, high[1], bar_index + 1, high[1],
-        color=color.orange, style=line.style_dashed, width=1)
+        color=i_col_bos_line, style=line.style_dashed, width=1)
 if brk_valid_short and pull_short > 0 and pivot_l
     bos_lvl_short  := low[1]
     bos_line_short := line.new(bar_index, low[1], bar_index + 1, low[1],
-        color=color.orange, style=line.style_dashed, width=1)
+        color=i_col_bos_line, style=line.style_dashed, width=1)
 
 // Extend BOS lines rightward each bar until entry fires or session ends
 if not na(bos_lvl_long)  and not na(bos_line_long)

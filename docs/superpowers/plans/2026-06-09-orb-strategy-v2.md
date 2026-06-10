@@ -4,7 +4,7 @@
 
 **Goal:** `orb_strategy_v2.pine` — a Pine Script v6 strategy that trades 5m ORB breakouts using a two-consecutive-close breakout, a dual-revisit gate (structural level + ORB band), and a transferring floor/ceiling trigger, with per-instrument trade limits and a level-line visual suite.
 
-**Architecture:** Single Pine Script file on a 5m chart. 15m ORB data via `request.security()`. State in `var` variables reset on the 18:00 ET session boundary. Entries/exits via `strategy.entry()` / `strategy.exit()` with `process_orders_on_close=true`, `pyramiding=2`, `max_lines_count=500`.
+**Architecture:** Single Pine Script file on a 5m chart. The ORB is built natively from the three 5m bars in the 08:00–08:15 window (no `request.security` — that introduced a cross-timeframe lookahead delay that captured the prior session's ORB). State in `var` variables reset on the 18:00 ET session boundary. Entries/exits via `strategy.entry()` / `strategy.exit()` with `process_orders_on_close=true`, `pyramiding=2`, `max_lines_count=500`.
 
 **Core model — two tracked candle-pair levels (every bar, incl. pre-8AM):**
 
@@ -16,7 +16,7 @@
 | **Short** | `gr_high` | floor = `rg_low` |
 | **Long**  | `rg_low`  | ceiling = `gr_high` |
 
-**Tech Stack:** Pine Script v6, TradingView strategy overlay, `request.security()` for 15m data, `ta.vwap` / `ta.sma`.
+**Tech Stack:** Pine Script v6, TradingView strategy overlay, `request.security()` for prior-day H/L only, `ta.vwap` / `ta.sma`.
 
 ---
 
@@ -46,11 +46,11 @@ strategy("ORB Strategy V2", overlay=true, process_orders_on_close=true,
 
 ---
 
-## Task 2: Time Utilities, Instrument Detection, 15m ORB Data, State, Reset, Latch
+## Task 2: Time Utilities, Instrument Detection, ORB Build, State, Reset
 
-- [ ] **Time:** `et_hour` / `et_minute` / `et_hhmm`; `is_orb_bar = et_hour==8 and et_minute==0`; `new_session = et_hour==18 and et_minute==0`.
+- [ ] **Time:** `et_hour` / `et_minute` / `et_hhmm`; `in_orb_window = et_hhmm==800 or 805 or 810`; `new_session = et_hour==18 and et_minute==0`.
 - [ ] **Instrument detection + limits:** `inst_max` / `inst_cut` ternary by ticker; `time_ok = et_hhmm < inst_cut`.
-- [ ] **15m ORB data:** `orb_high_raw` / `orb_low_raw` via `request.security(..., "15", ta.valuewhen(8:00 ET, high/low, 0), gaps_off, lookahead_off)`.
+- [ ] **ORB build (native 5m):** accumulate `orb_high`/`orb_low` across the three 5m bars in the 08:00–08:15 window (`et_hhmm` 800/805/810); record `orb_anchor = bar_index` at 08:00; latch `orb_set` + `orb_mid` at the 08:10 close. No `request.security` — building from the chart's own bars avoids the cross-timeframe lookahead delay that otherwise captured the prior session's ORB.
 - [ ] **State variables** (the new set):
 
 ```pine
@@ -74,14 +74,16 @@ var bool  armed_short = false, armed_long = false
 var bool  floor_set = false,   ceil_set = false
 var float floor_short = na,    ceil_long = na
 
+// orb_anchor = bar_index of the 08:00 bar (box left edge)
 // Counter + BE slots (s1_*, s2_*) + visual objects (orb_box_obj, orb_mid_line,
 //   liq_line_s, floor_line_s, liq_line_l, ceil_line_l)
+var int orb_anchor = na
 var int entry_count = 0
 ```
 
 - [ ] **Session reset (`if new_session`)** clears every var above (levels → na, flags → false, lines → na, `entry_count := 0`).
-- [ ] **ORB latch (`is_orb_bar and not orb_set and not na(raw)`):** set `orb_high/low/mid`, `orb_set := true`.
-- [ ] Commit: `feat(v2): time utils, ORB data, state vars, session reset, latch`
+- [ ] **ORB build:** at `et_hhmm==800` start `orb_high/low` + record `orb_anchor`; at 805/810 fold in `max(high)`/`min(low)`; at 810 set `orb_mid` and latch `orb_set := true`. Downstream logic is gated on `not in_orb_window`, so the build bars never trigger signals.
+- [ ] Commit: `feat(v2): time utils, native ORB build, state vars, session reset`
 
 ---
 
@@ -111,7 +113,7 @@ if pair_rg
 Replaces the old C1/C2 logic. `bear_brk` / `bull_brk` latch for the session.
 
 ```pine
-if orb_set and not is_orb_bar
+if orb_set and not in_orb_window
     bool bear_now  = close   < orb_low  and close   < open
     bool bear_prev = close[1] < orb_low and close[1] < open[1]
     bool bull_now  = close   > orb_high and close   > open
@@ -266,7 +268,7 @@ if pos_closed
 
 | Spec point | Covered In |
 |---|---|
-| 5m execution / 15m ORB | Task 2 |
+| 5m execution / ORB built natively from 5m bars (08:00–08:15) | Task 2 |
 | Two-consecutive-close breakout | Task 4 |
 | `gr_high` / `rg_low` pair tracking (+ pre-8AM fallback) | Task 3 |
 | Dual revisit (structural + ORB band, any order) | Task 5 |

@@ -3,7 +3,7 @@
 // ═════════════════════════════════════════════════════════════════════════════
 //  ORB Strategy V2  |  Pine Script v6
 //  Chart     : 5-minute
-//  ORB Source: 15-minute (via request.security)
+//  ORB Source: 8:00–8:15 AM ET window, built natively from three 5m bars
 //  Session   : 8:00 AM ET open  |  Reset: 18:00 ET
 //  Instruments: NQ, MNQ, ES, MES, YM, MYM, GC, MGC
 //
@@ -91,8 +91,9 @@ int et_hour   = hour(time,   "America/New_York")
 int et_minute = minute(time, "America/New_York")
 int et_hhmm   = et_hour * 100 + et_minute
 
-bool is_orb_bar  = et_hour == 8 and et_minute == 0
-bool new_session = et_hour == 18 and et_minute == 0
+// The 8:00 AM 15m ORB candle = three 5m bars: 08:00, 08:05, 08:10
+bool in_orb_window = et_hhmm == 800 or et_hhmm == 805 or et_hhmm == 810
+bool new_session   = et_hour == 18 and et_minute == 0
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  INSTRUMENT DETECTION + PER-INSTRUMENT LIMITS
@@ -120,30 +121,15 @@ int inst_cut = is_nq  ? i_cut_nq  : is_mnq ? i_cut_mnq :
 bool time_ok = et_hhmm < inst_cut
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  15M ORB DATA  (request.security fetches 15m OHLC in 5m chart context)
-// ─────────────────────────────────────────────────────────────────────────────
-
-float orb_high_raw = request.security(syminfo.tickerid, "15",
-    ta.valuewhen(
-        hour(time, "America/New_York") == 8 and minute(time, "America/New_York") == 0,
-        high, 0),
-    barmerge.gaps_off, barmerge.lookahead_off)
-
-float orb_low_raw  = request.security(syminfo.tickerid, "15",
-    ta.valuewhen(
-        hour(time, "America/New_York") == 8 and minute(time, "America/New_York") == 0,
-        low, 0),
-    barmerge.gaps_off, barmerge.lookahead_off)
-
-// ─────────────────────────────────────────────────────────────────────────────
 //  STATE VARIABLES
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ORB
-var bool  orb_set  = false
-var float orb_high = na
-var float orb_low  = na
-var float orb_mid  = na
+var bool  orb_set    = false
+var float orb_high   = na
+var float orb_low    = na
+var float orb_mid    = na
+var int   orb_anchor = na   // bar_index of the 08:00 bar (box left edge)
 
 // Candle-pair levels (tracked every bar, incl. pre-8AM, for fallback)
 //   gr_high = high of most recent green→red (bullish→bearish) pair
@@ -204,6 +190,7 @@ if new_session
     orb_high         := na
     orb_low          := na
     orb_mid          := na
+    orb_anchor       := na
     gr_high          := na
     rg_low           := na
     bear_brk         := false
@@ -237,14 +224,22 @@ if new_session
     ceil_line_l      := na
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  ORB LATCH  (8:00 AM ET bar — set once per session)
+//  ORB BUILD  (native 5m aggregation over the 08:00–08:15 window)
+//  Accumulate high/low across the three 5m bars (08:00, 08:05, 08:10);
+//  latch complete at the 08:10 close (= 8:15) so the range is final before use.
 // ─────────────────────────────────────────────────────────────────────────────
 
-if is_orb_bar and not orb_set and not na(orb_high_raw) and not na(orb_low_raw)
-    orb_set  := true
-    orb_high := orb_high_raw
-    orb_low  := orb_low_raw
-    orb_mid  := (orb_high_raw + orb_low_raw) / 2
+if et_hhmm == 800 and not orb_set
+    orb_high   := high
+    orb_low    := low
+    orb_anchor := bar_index
+else if (et_hhmm == 805 or et_hhmm == 810) and not orb_set and not na(orb_high)
+    orb_high := math.max(orb_high, high)
+    orb_low  := math.min(orb_low,  low)
+
+if et_hhmm == 810 and not orb_set and not na(orb_high)
+    orb_mid := (orb_high + orb_low) / 2
+    orb_set := true
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CANDLE-PAIR TRACKING  (every bar — feeds liquidity levels + floor/ceiling)
@@ -267,7 +262,7 @@ if pair_rg
 //  BREAKOUT  (two CONSECUTIVE bearish/bullish bars body-close beyond ORB)
 // ─────────────────────────────────────────────────────────────────────────────
 
-if orb_set and not is_orb_bar
+if orb_set and not in_orb_window
     bool bear_now  = close   < orb_low  and close   < open
     bool bear_prev = close[1] < orb_low and close[1] < open[1]
     bool bull_now  = close   > orb_high and close   > open
@@ -457,10 +452,10 @@ if pos_closed
 //  ORB VISUALS  (box + midpoint, extending to i_orb_end)
 // ─────────────────────────────────────────────────────────────────────────────
 
-if orb_set and is_orb_bar and na(orb_box_obj)
-    orb_box_obj  := box.new(bar_index, orb_high, bar_index + 1, orb_low,
+if orb_set and na(orb_box_obj) and not na(orb_anchor)
+    orb_box_obj  := box.new(orb_anchor, orb_high, bar_index + 1, orb_low,
                              border_color=i_col_orb_box, bgcolor=i_col_orb_box)
-    orb_mid_line := line.new(bar_index, orb_mid, bar_index + 1, orb_mid,
+    orb_mid_line := line.new(orb_anchor, orb_mid, bar_index + 1, orb_mid,
                               color=i_col_orb_mid, style=line.style_dashed, width=1)
 
 if orb_set and not na(orb_box_obj) and et_hhmm <= i_orb_end

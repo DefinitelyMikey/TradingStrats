@@ -9,8 +9,8 @@ Instruments: MNQ, NQ, ES, MES, MGC.
 
 ## 1. ORB Definition
 
-- **Timeframe**: 15-min chart only (hardcoded)
-- **ORB candle**: 8:00 AM ET candle (single 15-min candle, 8:00–8:15 AM)
+- **Timeframe**: 5-min execution chart
+- **ORB candle**: the 8:00–8:15 AM ET window — built natively from the three 5m bars (08:00, 08:05, 08:10), high/low aggregated, finalized at the 08:10 close
 - **ORB high**: wick high of 8:00 AM candle
 - **ORB low**: wick low of 8:00 AM candle
 - **ORB midpoint**: (ORB high + ORB low) / 2
@@ -173,7 +173,7 @@ The `i_commission` and `i_slippage` inputs in the script are retained as referen
 
 Signal engine rewritten 2026-06-10. The old grading/pullback-depth/pivot-sweep system was removed entirely.
 
-- Runs on **5m chart**; 15m ORB sourced via `request.security()` using `ta.valuewhen`
+- Runs on **5m chart**; ORB built natively from the three 5m bars in the 08:00–08:15 window (no `request.security` — avoids the cross-timeframe lookahead delay that captured the prior session's ORB on the execution chart)
 - **Two tracked levels**: `gr_high` (most recent green→red pair high) and `rg_low` (most recent red→green pair low). Short structural = `gr_high`, short floor = `rg_low`; long structural = `rg_low`, long ceiling = `gr_high`
 - **Breakout**: two consecutive bearish (long: bullish) bars both body-close beyond the ORB edge; `bear_brk` / `bull_brk` latch for the session
 - **Dual revisit**: structural-level touch + ORB-band touch, any order, gated on the prior bar's breakout latch

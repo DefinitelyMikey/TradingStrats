@@ -7,14 +7,18 @@
 //  Session   : 8:00 AM ET open  |  Reset: 18:00 ET
 //  Instruments: NQ, MNQ, ES, MES, YM, MYM, GC, MGC
 //
-//  Entry logic:
-//    1. Breakout validated: C1 close outside ORB + wick cleared (last candle
-//       pair extreme), C2+ full body outside ORB
-//    2. Pullback: price returns toward ORB zone, sweeps prior swing (liquidity)
-//    3. BOS: bull/bear body close beyond most recent pullback pivot
-//    Grade assigned at entry (A/B/C/2B/2C) based on pullback depth + liq sweep
+//  Entry logic (short; long mirrors):
+//    1. Breakout : two CONSECUTIVE bearish bars both body-close below ORB low
+//    2. Liquidity: structural level = high of most recent green→red pair
+//                  (falls back to the most recent pre-8AM green→red high)
+//    3. Revisit  : price must touch BOTH the structural level AND the ORB band
+//                  (any order)
+//    4. Floor    : once revisits done, floor = low of most recent red→green pair
+//    5. Transfer : a wick that pierces the floor but doesn't body-close below it
+//                  moves the floor down to that wick's low; repeat
+//    6. Entry    : a bearish bar body-closes below the valid floor
 //
-//  Trade mgmt: SL = BOS candle body open | TP = 2:1 RR | BE at 1:1 RR
+//  Trade mgmt: SL = entry candle body open | TP = 2:1 RR | BE at 1:1 RR
 //  Max entries per session: user-adjustable per instrument (default 2)
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -57,48 +61,26 @@ i_orb_end = input.int(
     group="📐 ORB Settings",
     tooltip="ORB box and midpoint line extend rightward until this time. Default 17:00 ET.")
 
-// ── Setup Grades ─────────────────────────────────────────────────────────────
-i_grade_a  = input.bool(true, "Enable Grade A",  group="🏆 Setup Grades",
-    tooltip="Deep pullback (through full ORB zone) + liquidity sweep. Highest quality.")
-i_grade_b  = input.bool(true, "Enable Grade B",  group="🏆 Setup Grades",
-    tooltip="Mid pullback (ORB midpoint touch) + liquidity sweep.")
-i_grade_c  = input.bool(true, "Enable Grade C",  group="🏆 Setup Grades",
-    tooltip="Shallow pullback (ORB boundary touch) + liquidity sweep.")
-i_grade_2b = input.bool(true, "Enable Grade 2B", group="🏆 Setup Grades",
-    tooltip="Mid pullback, no liquidity sweep.")
-i_grade_2c = input.bool(true, "Enable Grade 2C", group="🏆 Setup Grades",
-    tooltip="Shallow pullback, no liquidity sweep.")
-
 // ── Visuals ───────────────────────────────────────────────────────────────────
-i_show_swing      = input.bool(true,  "Show Swing High/Low Markers", group="👁 Visuals")
-i_show_grade_text = input.bool(true,  "Show Grade Text on Entry",    group="👁 Visuals")
-i_pivot_lookback  = input.int(10, "Swing Pivot Lookback (bars each side)", minval=1, maxval=50,
-    group="👁 Visuals",
-    tooltip="Bars required on each side of a pivot to confirm a swing high/low. Higher = fewer, higher-quality swings. Default 10.")
-i_show_volume  = input.bool(false, "Show Volume Context",         group="👁 Visuals")
-i_show_vwap    = input.bool(false, "Show VWAP",                   group="👁 Visuals")
-i_show_pdhl    = input.bool(false, "Show Prior Day High/Low",     group="👁 Visuals")
+i_show_levels = input.bool(true,  "Show Level Lines (liquidity + floor/ceiling)", group="👁 Visuals")
+i_show_volume = input.bool(false, "Show Volume Context",     group="👁 Visuals")
+i_show_vwap   = input.bool(false, "Show VWAP",               group="👁 Visuals")
+i_show_pdhl   = input.bool(false, "Show Prior Day High/Low", group="👁 Visuals")
 i_vol_lookback = input.int(20, "Volume Avg Lookback (bars)", minval=5, maxval=100,
     group="👁 Visuals",
     tooltip="Bars used to compute average volume for context display.")
 
 // ── Colors ────────────────────────────────────────────────────────────────────
-i_col_orb_box  = input.color(color.new(color.blue,   80), "ORB Box",        group="🎨 Colors")
-i_col_orb_mid  = input.color(color.new(color.blue,   30), "ORB Midpoint",   group="🎨 Colors")
-i_col_bos_line = input.color(color.orange,                 "BOS Level Line",  group="🎨 Colors")
-i_col_swing_h  = input.color(color.new(color.lime,    0), "Swing High",     group="🎨 Colors")
-i_col_swing_l  = input.color(color.new(color.red,     0), "Swing Low",      group="🎨 Colors")
-i_col_grade_a  = input.color(color.new(color.green,   0), "Grade A Label",  group="🎨 Colors")
-i_col_grade_b  = input.color(color.new(color.lime,    0), "Grade B Label",  group="🎨 Colors")
-i_col_grade_c  = input.color(color.new(color.yellow,  0), "Grade C Label",  group="🎨 Colors")
-i_col_grade_2b = input.color(color.new(color.orange,  0), "Grade 2B Label", group="🎨 Colors")
-i_col_grade_2c = input.color(color.new(color.red,     0), "Grade 2C Label", group="🎨 Colors")
-i_col_vwap     = input.color(color.new(color.purple,  0), "VWAP",           group="🎨 Colors")
-i_col_pdhl     = input.color(color.new(color.gray,    0), "Prior Day H/L",  group="🎨 Colors")
-i_col_vol_hi   = input.color(color.new(color.yellow,  0), "Volume Spike",   group="🎨 Colors")
+i_col_orb_box = input.color(color.new(color.blue,  80), "ORB Box",          group="🎨 Colors")
+i_col_orb_mid = input.color(color.new(color.blue,  30), "ORB Midpoint",     group="🎨 Colors")
+i_col_liq     = input.color(color.white,                "Liquidity Level",  group="🎨 Colors")
+i_col_floor   = input.color(color.orange,               "Floor / Ceiling",  group="🎨 Colors")
+i_col_vwap    = input.color(color.new(color.purple, 0), "VWAP",             group="🎨 Colors")
+i_col_pdhl    = input.color(color.new(color.gray,   0), "Prior Day H/L",    group="🎨 Colors")
+i_col_vol_hi  = input.color(color.new(color.yellow, 0), "Volume Spike",     group="🎨 Colors")
 
 strategy("ORB Strategy V2", overlay=true, process_orders_on_close=true,
-    pyramiding=2, max_bars_back=500,
+    pyramiding=2, max_bars_back=500, max_lines_count=500,
     default_qty_type=strategy.fixed, default_qty_value=1)
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,42 +136,6 @@ float orb_low_raw  = request.security(syminfo.tickerid, "15",
     barmerge.gaps_off, barmerge.lookahead_off)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  HELPER FUNCTIONS
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Grade string from pullback depth + liquidity ("" = invalid or disabled)
-grade_str(int depth, bool liq) =>
-    string _g = ""
-    if depth == 3
-        _g := liq ? "A" : ""
-    else if depth == 2
-        _g := liq ? "B" : "2B"
-    else if depth == 1
-        _g := liq ? "C" : "2C"
-    bool _ea  = _g == "A"  and i_grade_a
-    bool _eb  = _g == "B"  and i_grade_b
-    bool _ec  = _g == "C"  and i_grade_c
-    bool _e2b = _g == "2B" and i_grade_2b
-    bool _e2c = _g == "2C" and i_grade_2c
-    bool _en  = _ea or _eb or _ec or _e2b or _e2c
-    _en ? _g : ""
-
-// Color for a grade string
-grade_col(string g) =>
-    color _c = color.gray
-    if g == "A"
-        _c := i_col_grade_a
-    else if g == "B"
-        _c := i_col_grade_b
-    else if g == "C"
-        _c := i_col_grade_c
-    else if g == "2B"
-        _c := i_col_grade_2b
-    else if g == "2C"
-        _c := i_col_grade_2c
-    _c
-
-// ─────────────────────────────────────────────────────────────────────────────
 //  STATE VARIABLES
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -199,29 +145,29 @@ var float orb_high = na
 var float orb_low  = na
 var float orb_mid  = na
 
-// Breakout validation
-var bool brk_c1_long    = false
-var bool brk_c1_short   = false
-var bool brk_c2_long    = false
-var bool brk_c2_short   = false
-var bool brk_valid_long  = false
-var bool brk_valid_short = false
+// Candle-pair levels (tracked every bar, incl. pre-8AM, for fallback)
+//   gr_high = high of most recent green→red (bullish→bearish) pair
+//   rg_low  = low  of most recent red→green (bearish→bullish) pair
+var float gr_high = na
+var float rg_low  = na
 
-// Pullback depth: 0=none, 1=shallow (boundary touch), 2=mid, 3=deep (through ORB)
-var int pull_long  = 0
-var int pull_short = 0
+// Breakout (two consecutive body-closes beyond ORB)
+var bool bear_brk = false
+var bool bull_brk = false
 
-// Liquidity sweep flag
-var bool liq_long  = false
-var bool liq_short = false
+// Dual-revisit gates (structural level + ORB band)
+var bool rev_struct_short = false
+var bool rev_orb_short    = false
+var bool rev_struct_long  = false
+var bool rev_orb_long      = false
 
-// Swing levels (3-bar pivot, updated each bar after ORB set)
-var float swing_high = na
-var float swing_low  = na
-
-// BOS trigger levels (most recent pivot formed during pullback phase)
-var float bos_lvl_long  = na
-var float bos_lvl_short = na
+// Armed + locked trigger levels
+var bool  armed_short    = false
+var bool  armed_long     = false
+var bool  floor_set      = false
+var bool  ceil_set       = false
+var float floor_short    = na
+var float ceil_long      = na
 
 // Session trade counter
 var int entry_count = 0
@@ -241,11 +187,13 @@ var bool   s2_be_done = false
 var bool   s2_is_long = true
 var string s2_id      = ""
 
-// ORB visual objects (persist for box extending)
+// Visual objects (persist for extending)
 var box  orb_box_obj  = na
 var line orb_mid_line = na
-var line bos_line_long  = na
-var line bos_line_short = na
+var line liq_line_s   = na
+var line floor_line_s = na
+var line liq_line_l   = na
+var line ceil_line_l  = na
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  SESSION RESET  (18:00 ET — futures new session)
@@ -256,22 +204,20 @@ if new_session
     orb_high         := na
     orb_low          := na
     orb_mid          := na
-    brk_c1_long      := false
-    brk_c1_short     := false
-    brk_c2_long      := false
-    brk_c2_short     := false
-    brk_valid_long   := false
-    brk_valid_short  := false
-    pull_long        := 0
-    pull_short       := 0
-    liq_long         := false
-    liq_short        := false
-    swing_high       := na
-    swing_low        := na
-    bos_lvl_long     := na
-    bos_lvl_short    := na
-    bos_line_long    := na
-    bos_line_short   := na
+    gr_high          := na
+    rg_low           := na
+    bear_brk         := false
+    bull_brk         := false
+    rev_struct_short := false
+    rev_orb_short    := false
+    rev_struct_long  := false
+    rev_orb_long     := false
+    armed_short      := false
+    armed_long       := false
+    floor_set        := false
+    ceil_set         := false
+    floor_short      := na
+    ceil_long        := na
     entry_count      := 0
     s1_entry         := na
     s1_sl            := na
@@ -285,6 +231,10 @@ if new_session
     s2_id            := ""
     orb_box_obj      := na
     orb_mid_line     := na
+    liq_line_s       := na
+    floor_line_s     := na
+    liq_line_l       := na
+    ceil_line_l      := na
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ORB LATCH  (8:00 AM ET bar — set once per session)
@@ -297,141 +247,94 @@ if is_orb_bar and not orb_set and not na(orb_high_raw) and not na(orb_low_raw)
     orb_mid  := (orb_high_raw + orb_low_raw) / 2
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  SWING HIGH / LOW  (3-bar pivot)
+//  CANDLE-PAIR TRACKING  (every bar — feeds liquidity levels + floor/ceiling)
 // ─────────────────────────────────────────────────────────────────────────────
 
-float _ph = ta.pivothigh(i_pivot_lookback, i_pivot_lookback)
-float _pl = ta.pivotlow (i_pivot_lookback, i_pivot_lookback)
-bool pivot_h = not na(_ph)
-bool pivot_l = not na(_pl)
+bool prev_bull = close[1] > open[1]
+bool prev_bear = close[1] < open[1]
+bool cur_bull  = close > open
+bool cur_bear  = close < open
 
-if orb_set and pivot_h
-    swing_high := _ph
-if orb_set and pivot_l
-    swing_low  := _pl
+bool pair_gr = prev_bull and cur_bear   // green → red  (bullish → bearish)
+bool pair_rg = prev_bear and cur_bull   // red → green  (bearish → bullish)
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  BREAKOUT VALIDATION
-//  C1: close outside ORB AND clears last [green→red] (buy) or [red→green] (sell) pair extreme
-//  C2+: full body (open AND close) outside ORB, on any bar after C1
-// ─────────────────────────────────────────────────────────────────────────────
-
-if orb_set and not is_orb_bar
-
-    // ── C1 Long ──────────────────────────────────────────────────────────────
-    if not brk_c1_long and close > orb_high
-        float pair_ext = na
-        for i = 1 to 50
-            bool is_g = close[i + 1] > open[i + 1]
-            bool is_r = close[i]     < open[i]
-            if is_g and is_r
-                pair_ext := math.max(high[i], high[i + 1])
-                break
-        if not na(pair_ext) and close > pair_ext
-            brk_c1_long := true
-
-    // ── C1 Short ─────────────────────────────────────────────────────────────
-    if not brk_c1_short and close < orb_low
-        float pair_ext = na
-        for i = 1 to 50
-            bool is_r = close[i + 1] < open[i + 1]
-            bool is_g = close[i]     > open[i]
-            if is_r and is_g
-                pair_ext := math.min(low[i], low[i + 1])
-                break
-        if not na(pair_ext) and close < pair_ext
-            brk_c1_short := true
-
-    // ── C2+ Long: full body above ORB high ───────────────────────────────────
-    if brk_c1_long and not brk_c2_long
-        bool c2l = open > orb_high and close > orb_high
-        if c2l
-            brk_c2_long := true
-
-    // ── C2+ Short: full body below ORB low ───────────────────────────────────
-    if brk_c1_short and not brk_c2_short
-        bool c2s = open < orb_low and close < orb_low
-        if c2s
-            brk_c2_short := true
-
-    // ── Valid breakout flags ──────────────────────────────────────────────────
-    if brk_c1_long  and brk_c2_long  and not brk_valid_long
-        brk_valid_long  := true
-    if brk_c1_short and brk_c2_short and not brk_valid_short
-        brk_valid_short := true
+if pair_gr
+    gr_high := math.max(high, high[1])
+if pair_rg
+    rg_low  := math.min(low,  low[1])
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  PULLBACK DEPTH + LIQUIDITY SWEEP
-//  Depth 1 = shallow: wick touches ORB boundary edge
-//  Depth 2 = mid    : wick touches ORB midpoint
-//  Depth 3 = deep   : wick breaches through entire ORB zone
-//  Liquidity        : wick sweeps the last confirmed session swing low (long)
-//                     or swing high (short)
+//  BREAKOUT  (two CONSECUTIVE bearish/bullish bars body-close beyond ORB)
 // ─────────────────────────────────────────────────────────────────────────────
 
 if orb_set and not is_orb_bar
-
-    // Long pullback (price retracing down after breaking above ORB high)
-    if brk_valid_long
-        if pull_long < 1 and low <= orb_high
-            pull_long := 1
-        if pull_long < 2 and low <= orb_mid
-            pull_long := 2
-        if pull_long < 3 and low <= orb_low
-            pull_long := 3
-        if not liq_long and not na(swing_low) and low <= swing_low
-            liq_long := true
-
-    // Short pullback (price retracing up after breaking below ORB low)
-    if brk_valid_short
-        if pull_short < 1 and high >= orb_low
-            pull_short := 1
-        if pull_short < 2 and high >= orb_mid
-            pull_short := 2
-        if pull_short < 3 and high >= orb_high
-            pull_short := 3
-        if not liq_short and not na(swing_high) and high >= swing_high
-            liq_short := true
+    bool bear_now  = close   < orb_low  and close   < open
+    bool bear_prev = close[1] < orb_low and close[1] < open[1]
+    bool bull_now  = close   > orb_high and close   > open
+    bool bull_prev = close[1] > orb_high and close[1] > open[1]
+    if not bear_brk and bear_now and bear_prev
+        bear_brk := true
+    if not bull_brk and bull_now and bull_prev
+        bull_brk := true
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  BOS LEVEL  (track most recent pivot that forms during pullback phase)
-//  This becomes the structural level a BOS candle must close beyond for entry
+//  DUAL REVISIT  (structural level + ORB band — any order, evaluated AFTER break)
+//  bear_brk[1] / bull_brk[1] = breakout already valid as of the prior bar,
+//  so the breakout candle itself can't satisfy the revisit
 // ─────────────────────────────────────────────────────────────────────────────
 
-if brk_valid_long  and pull_long  > 0 and pivot_h
-    bos_lvl_long  := high[1]
-    bos_line_long := line.new(bar_index, high[1], bar_index + 1, high[1],
-        color=i_col_bos_line, style=line.style_dashed, width=1)
-if brk_valid_short and pull_short > 0 and pivot_l
-    bos_lvl_short  := low[1]
-    bos_line_short := line.new(bar_index, low[1], bar_index + 1, low[1],
-        color=i_col_bos_line, style=line.style_dashed, width=1)
+if bear_brk[1]
+    if not rev_struct_short and not na(gr_high) and high >= gr_high
+        rev_struct_short := true
+    if not rev_orb_short and high >= orb_low
+        rev_orb_short := true
 
-// Extend BOS lines rightward each bar until entry fires or session ends
-if not na(bos_lvl_long)  and not na(bos_line_long)
-    line.set_x2(bos_line_long,  bar_index + 1)
-if not na(bos_lvl_short) and not na(bos_line_short)
-    line.set_x2(bos_line_short, bar_index + 1)
+if bull_brk[1]
+    if not rev_struct_long and not na(rg_low) and low <= rg_low
+        rev_struct_long := true
+    if not rev_orb_long and low <= orb_high
+        rev_orb_long := true
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  BOS ENTRY TRIGGER
+//  ARM + LOCK TRIGGER LEVEL + TRANSFER
+//  Short floor = low of most recent red→green pair, locked at arming;
+//    transfers DOWN on any wick that pierces it without a body-close-below.
+//  Long ceiling = high of most recent green→red pair, locked at arming;
+//    transfers UP on any wick that pierces it without a body-close-above.
 // ─────────────────────────────────────────────────────────────────────────────
 
-float body_high = math.max(open, close)
-float body_low  = math.min(open, close)
-bool  bull_bar  = close > open
-bool  bear_bar  = close < open
+if not armed_short and bear_brk and rev_struct_short and rev_orb_short
+    armed_short := true
+if armed_short and not floor_set and not na(rg_low)
+    floor_short := rg_low
+    floor_set   := true
+if floor_set and not na(floor_short) and low < floor_short and close >= floor_short
+    floor_short := low
 
-string cur_grade_long  = grade_str(pull_long,  liq_long)
-string cur_grade_short = grade_str(pull_short, liq_short)
+if not armed_long and bull_brk and rev_struct_long and rev_orb_long
+    armed_long := true
+if armed_long and not ceil_set and not na(gr_high)
+    ceil_long := gr_high
+    ceil_set  := true
+if ceil_set and not na(ceil_long) and high > ceil_long and close <= ceil_long
+    ceil_long := high
 
-bool buy_signal  = brk_valid_long  and pull_long  > 0 and not na(bos_lvl_long)  and
-                   cur_grade_long  != "" and bull_bar  and body_high > bos_lvl_long  and
-                   entry_count < inst_max and time_ok
+// ─────────────────────────────────────────────────────────────────────────────
+//  ENTRY TRIGGER
+// ─────────────────────────────────────────────────────────────────────────────
 
-bool sell_signal = brk_valid_short and pull_short > 0 and not na(bos_lvl_short) and
-                   cur_grade_short != "" and bear_bar  and body_low  < bos_lvl_short and
-                   entry_count < inst_max and time_ok
+bool bull_bar = close > open
+bool bear_bar = close < open
+
+bool s_armed = armed_short and floor_set and not na(floor_short)
+bool s_trig  = bear_bar and close < floor_short
+bool s_room  = entry_count < inst_max and time_ok
+bool sell_signal = s_armed and s_trig and s_room
+
+bool l_armed = armed_long and ceil_set and not na(ceil_long)
+bool l_trig  = bull_bar and close > ceil_long
+bool l_room  = entry_count < inst_max and time_ok
+bool buy_signal = l_armed and l_trig and l_room
 
 // ── Long entry ───────────────────────────────────────────────────────────────
 if buy_signal
@@ -456,10 +359,14 @@ if buy_signal
         s2_is_long := true
         s2_id      := _id
     entry_count := entry_count + 1
-    if i_show_grade_text
-        label.new(bar_index, high + ta.atr(14) * 3.0, cur_grade_long,
-            style=label.style_none, color=color.new(color.black, 100),
-            textcolor=grade_col(cur_grade_long), size=size.large)
+    // reset long setup so re-entry needs a fresh revisit + ceiling
+    armed_long      := false
+    rev_struct_long := false
+    rev_orb_long    := false
+    ceil_set        := false
+    ceil_long       := na
+    liq_line_l      := na
+    ceil_line_l     := na
 
 // ── Short entry ──────────────────────────────────────────────────────────────
 if sell_signal
@@ -484,10 +391,14 @@ if sell_signal
         s2_is_long := false
         s2_id      := _id
     entry_count := entry_count + 1
-    if i_show_grade_text
-        label.new(bar_index, high + ta.atr(14) * 3.0, cur_grade_short,
-            style=label.style_none, color=color.new(color.black, 100),
-            textcolor=grade_col(cur_grade_short), size=size.large)
+    // reset short setup so re-entry needs a fresh revisit + floor
+    armed_short      := false
+    rev_struct_short := false
+    rev_orb_short    := false
+    floor_set        := false
+    floor_short      := na
+    liq_line_s       := na
+    floor_line_s     := na
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  BREAKEVEN MANAGEMENT  (move SL to entry when 1:1 RR reached)
@@ -509,7 +420,7 @@ if not na(s2_entry) and not s2_be_done and s2_id != ""
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  POSITION CLOSE HANDLING  (BE stop-out or TP hit)
-//  Clear slots and reset BOS level so re-entry can form a fresh setup
+//  Clear slots + reset both setups so a fresh setup can build for re-entry
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool pos_closed = strategy.position_size == 0 and
@@ -517,20 +428,30 @@ bool pos_closed = strategy.position_size == 0 and
                   not new_session
 
 if pos_closed
-    s1_entry      := na
-    s1_sl         := na
-    s1_tp         := na
-    s1_be_done    := false
-    s1_id         := ""
-    s2_entry      := na
-    s2_sl         := na
-    s2_tp         := na
-    s2_be_done    := false
-    s2_id         := ""
-    bos_lvl_long   := na
-    bos_lvl_short  := na
-    bos_line_long  := na
-    bos_line_short := na
+    s1_entry         := na
+    s1_sl            := na
+    s1_tp            := na
+    s1_be_done       := false
+    s1_id            := ""
+    s2_entry         := na
+    s2_sl            := na
+    s2_tp            := na
+    s2_be_done       := false
+    s2_id            := ""
+    armed_short      := false
+    armed_long       := false
+    rev_struct_short := false
+    rev_orb_short    := false
+    rev_struct_long  := false
+    rev_orb_long     := false
+    floor_set        := false
+    ceil_set         := false
+    floor_short      := na
+    ceil_long        := na
+    liq_line_s       := na
+    floor_line_s     := na
+    liq_line_l       := na
+    ceil_line_l      := na
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ORB VISUALS  (box + midpoint, extending to i_orb_end)
@@ -547,18 +468,48 @@ if orb_set and not na(orb_box_obj) and et_hhmm <= i_orb_end
     line.set_x2(orb_mid_line, bar_index + 1)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  SWING MARKERS  (triangles offset above/below wick so they don't overlap)
+//  LEVEL LINE VISUALS  (liquidity level while waiting, floor/ceiling once locked)
 // ─────────────────────────────────────────────────────────────────────────────
 
-float swing_off = ta.atr(14) * 2.0
+// Short liquidity level (the structural high to revisit) — drawn until revisited
+if i_show_levels and bear_brk and not rev_struct_short and not na(gr_high)
+    if na(liq_line_s)
+        liq_line_s := line.new(bar_index, gr_high, bar_index + 1, gr_high,
+            color=i_col_liq, style=line.style_dashed, width=1)
+    else
+        line.set_y1(liq_line_s, gr_high)
+        line.set_y2(liq_line_s, gr_high)
+        line.set_x2(liq_line_s, bar_index + 1)
 
-if i_show_swing and orb_set and pivot_h
-    label.new(bar_index[i_pivot_lookback], _ph + swing_off, "▲",
-        style=label.style_none, textcolor=i_col_swing_h, size=size.small)
+// Short floor (trigger) — drawn + transferred while armed
+if i_show_levels and floor_set and not na(floor_short)
+    if na(floor_line_s)
+        floor_line_s := line.new(bar_index, floor_short, bar_index + 1, floor_short,
+            color=i_col_floor, style=line.style_dashed, width=1)
+    else
+        line.set_y1(floor_line_s, floor_short)
+        line.set_y2(floor_line_s, floor_short)
+        line.set_x2(floor_line_s, bar_index + 1)
 
-if i_show_swing and orb_set and pivot_l
-    label.new(bar_index[i_pivot_lookback], _pl - swing_off, "▼",
-        style=label.style_none, textcolor=i_col_swing_l, size=size.small)
+// Long liquidity level (the structural low to revisit) — drawn until revisited
+if i_show_levels and bull_brk and not rev_struct_long and not na(rg_low)
+    if na(liq_line_l)
+        liq_line_l := line.new(bar_index, rg_low, bar_index + 1, rg_low,
+            color=i_col_liq, style=line.style_dashed, width=1)
+    else
+        line.set_y1(liq_line_l, rg_low)
+        line.set_y2(liq_line_l, rg_low)
+        line.set_x2(liq_line_l, bar_index + 1)
+
+// Long ceiling (trigger) — drawn + transferred while armed
+if i_show_levels and ceil_set and not na(ceil_long)
+    if na(ceil_line_l)
+        ceil_line_l := line.new(bar_index, ceil_long, bar_index + 1, ceil_long,
+            color=i_col_floor, style=line.style_dashed, width=1)
+    else
+        line.set_y1(ceil_line_l, ceil_long)
+        line.set_y2(ceil_line_l, ceil_long)
+        line.set_x2(ceil_line_l, bar_index + 1)
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  REFERENCE LINES  (VWAP + Prior Day High/Low)
@@ -579,7 +530,7 @@ plot(i_show_pdhl ? pdl_val : na, "PDL",
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  VOLUME CONTEXT  (visual only — not an entry filter)
-//  Highlights BOS candle background when volume exceeds session average
+//  Highlights entry candle background when volume exceeds session average
 // ─────────────────────────────────────────────────────────────────────────────
 
 float vol_avg   = ta.sma(volume, i_vol_lookback)

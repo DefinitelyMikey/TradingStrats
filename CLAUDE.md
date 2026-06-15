@@ -121,6 +121,7 @@ Rules are identical for every instrument — no per-instrument max-trades or tim
 | Enable Custom SL/TP Multiples | ORB Settings | OFF |
 | SL Multiple (x candle range) | ORB Settings | 1.0 |
 | TP Multiple (x candle range) | ORB Settings | 2.0 |
+| Reverse Signals (Buy↔Sell) | ORB Settings | OFF |
 | Show Level Lines | Visuals | ON |
 | Show Volume Context | Visuals | OFF |
 | Show VWAP | Visuals | OFF |
@@ -199,6 +200,7 @@ Signal engine rewritten 2026-06-10. The old grading/pullback-depth/pivot-sweep s
 - **BE management**: tracks up to 2 slots via `s1_*` / `s2_*` vars; BE moves stop to entry at 1:1 RR (with a 1-trade cap, only slot 1 is ever used); gated on `i_move_sl_to_be` (default ON) — when OFF, the original SL placed at entry is never moved
 - **Custom SL/TP multiples**: gated on `i_custom_sl_tp` (default OFF). When ON, `_sl`/`_tp` at entry are computed as `close ∓ i_sl_mult * _r` / `close ± i_tp_mult * _r` instead of `open` / `close ± 2*_r`. Defaults (1.0 / 2.0) reproduce original behavior. Composes cleanly with `i_move_sl_to_be` — BE distance (`|entry - sl|`) scales with `i_sl_mult` automatically
 - **EOD flatten**: `if et_hhmm == 1645 and strategy.position_size != 0: strategy.close_all()`, placed after entries and before BE management; forces any open position closed by 4:45 PM ET regardless of SL/TP/BE state
+- **Reverse signals**: `i_reverse_signals` (default OFF). When ON, `buy_signal` (ceiling break) opens a SHORT and `sell_signal` (floor break) opens a LONG instead — direction is fully inverted. SL/TP are recomputed for the actual (reversed) direction rather than reused from the original-direction formulas: non-custom SL becomes `close ∓ R` (mirrors `open` not being on the correct side post-flip) and TP becomes `close ± 2R`; custom SL/TP multiples apply the same way, just on the flipped side. `s1_is_long`/`s2_is_long` reflect the actual position direction so BE management works unchanged
 - `new_session = et_hour == 18 and et_minute == 0` — same as V1
 - Commission/slippage: set in TradingView Properties tab (same as V1)
 - **Removed**: grade inputs/colors/labels, `grade_str()`, `grade_col()`, pullback-depth vars, `ta.pivothigh/pivotlow` swing detection, swing markers, old C1/C2 breakout rules

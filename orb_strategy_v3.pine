@@ -53,6 +53,9 @@ i_move_sl_to_be = input.bool(true, "Move SL to Breakeven at 1R", group="📐 ORB
 i_custom_sl_tp = input.bool(false, "Enable Custom SL/TP Multiples", group="📐 ORB Settings",
     tooltip="When ON, SL and TP are set as user-defined multiples of the trigger candle's range (|close-open|), overriding the default SL=candle open / TP=2R.")
 
+i_reverse_signals = input.bool(false, "Reverse Signals (Buy↔Sell)", group="📐 ORB Settings",
+    tooltip="When ON, a buy trigger opens a SHORT instead and a sell trigger opens a LONG instead. SL/TP are mirrored to match the reversed direction.")
+
 i_sl_mult = input.float(1.0, "SL Multiple (x candle range)", minval=0.01, step=0.1, group="📐 ORB Settings",
     tooltip="Only used when 'Enable Custom SL/TP Multiples' is ON.")
 
@@ -325,27 +328,34 @@ bool l_trig  = bull_bar and close > ceil_long
 bool l_room  = entry_count < max_trades and time_ok
 bool buy_signal = l_armed and l_trig and l_room
 
-// ── Long entry ───────────────────────────────────────────────────────────────
+// ── Long-trigger entry (buy_signal) ─────────────────────────────────────────
+// Normally opens a LONG; if i_reverse_signals is ON, opens a SHORT instead
+// with mirrored SL/TP.
 if buy_signal
     float _r  = math.abs(close - open)
-    float _sl = i_custom_sl_tp ? close - i_sl_mult * _r : open
-    float _tp = i_custom_sl_tp ? close + i_tp_mult * _r : close + 2.0 * _r
+    bool  _go_long = not i_reverse_signals
+    float _sl_long  = i_custom_sl_tp ? close - i_sl_mult * _r : open
+    float _sl_short = i_custom_sl_tp ? close + i_sl_mult * _r : close + _r
+    float _tp_long  = i_custom_sl_tp ? close + i_tp_mult * _r : close + 2.0 * _r
+    float _tp_short = i_custom_sl_tp ? close - i_tp_mult * _r : close - 2.0 * _r
+    float _sl = _go_long ? _sl_long : _sl_short
+    float _tp = _go_long ? _tp_long : _tp_short
     string _id = "L" + str.tostring(entry_count + 1)
-    strategy.entry(_id, strategy.long)
+    strategy.entry(_id, _go_long ? strategy.long : strategy.short)
     strategy.exit(_id + "x", _id, stop=_sl, limit=_tp)
     if na(s1_entry)
         s1_entry   := close
         s1_sl      := _sl
         s1_tp      := _tp
         s1_be_done := false
-        s1_is_long := true
+        s1_is_long := _go_long
         s1_id      := _id
     else
         s2_entry   := close
         s2_sl      := _sl
         s2_tp      := _tp
         s2_be_done := false
-        s2_is_long := true
+        s2_is_long := _go_long
         s2_id      := _id
     entry_count := entry_count + 1
     // reset long setup so re-entry needs a fresh revisit + ceiling
@@ -357,27 +367,34 @@ if buy_signal
     liq_line_l      := na
     ceil_line_l     := na
 
-// ── Short entry ──────────────────────────────────────────────────────────────
+// ── Short-trigger entry (sell_signal) ───────────────────────────────────────
+// Normally opens a SHORT; if i_reverse_signals is ON, opens a LONG instead
+// with mirrored SL/TP.
 if sell_signal
     float _r  = math.abs(close - open)
-    float _sl = i_custom_sl_tp ? close + i_sl_mult * _r : open
-    float _tp = i_custom_sl_tp ? close - i_tp_mult * _r : close - 2.0 * _r
+    bool  _go_long = i_reverse_signals
+    float _sl_long  = i_custom_sl_tp ? close - i_sl_mult * _r : close - _r
+    float _sl_short = i_custom_sl_tp ? close + i_sl_mult * _r : open
+    float _tp_long  = i_custom_sl_tp ? close + i_tp_mult * _r : close + 2.0 * _r
+    float _tp_short = i_custom_sl_tp ? close - i_tp_mult * _r : close - 2.0 * _r
+    float _sl = _go_long ? _sl_long : _sl_short
+    float _tp = _go_long ? _tp_long : _tp_short
     string _id = "S" + str.tostring(entry_count + 1)
-    strategy.entry(_id, strategy.short)
+    strategy.entry(_id, _go_long ? strategy.long : strategy.short)
     strategy.exit(_id + "x", _id, stop=_sl, limit=_tp)
     if na(s1_entry)
         s1_entry   := close
         s1_sl      := _sl
         s1_tp      := _tp
         s1_be_done := false
-        s1_is_long := false
+        s1_is_long := _go_long
         s1_id      := _id
     else
         s2_entry   := close
         s2_sl      := _sl
         s2_tp      := _tp
         s2_be_done := false
-        s2_is_long := false
+        s2_is_long := _go_long
         s2_id      := _id
     entry_count := entry_count + 1
     // reset short setup so re-entry needs a fresh revisit + floor

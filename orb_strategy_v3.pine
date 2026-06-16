@@ -2,10 +2,10 @@
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  ORB Strategy V3  |  Pine Script v6
-//  Chart     : 5-minute
-//  ORB Source: 8:00–8:15 AM ET window, built natively from three 5m bars
+//  Chart     : trade on 5-minute; ORB box + midpoint also render on ANY timeframe
+//  ORB Source: 08:00 AM ET window, length user-selectable (5/10/15/20/30/60 min)
 //  Session   : 8:00 AM ET open  |  Reset: 18:00 ET
-//  Instruments: NQ, MNQ, ES, MES, YM, MYM, GC, MGC
+//  Instruments: MES & MNQ (commission/capital reference) — also NQ, ES, YM, MYM, GC, MGC
 //
 //  Entry logic (short; long mirrors):
 //    1. Breakout : two CONSECUTIVE bars both body-close below ORB low (any color)
@@ -19,6 +19,7 @@
 //    6. Entry    : a bearish bar body-closes below the valid floor
 //
 //  Trade mgmt: SL = entry candle body open | TP = 2:1 RR | BE at 1:1 RR
+//  Backtest  : $50,000 start | comm $0.72/side (Tradovate MES/MNQ all-in) | 5% margin
 //  ONE trade per day (all instruments), taken only between 8:00 AM–12:00 PM ET.
 //  After that trade CLOSES, all setup drawing stops (ORB box/mid keep going).
 // ═════════════════════════════════════════════════════════════════════════════
@@ -29,9 +30,9 @@
 
 // ── Backtest Settings ────────────────────────────────────────────────────────
 i_commission = input.float(
-    2.00, "Commission Per Side ($)", minval=0, step=0.25,
+    0.72, "Commission Per Side ($) — MES/MNQ", minval=0, step=0.01,
     group="⚙️ Backtest Settings",
-    tooltip="Reference only — Pine Script v6 requires constant values in strategy(). Set via Strategy Settings → Properties → Commission.")
+    tooltip="Display reference only. The LIVE value is baked into strategy(commission_value) below = $0.72/side: Tradovate all-in for MES & MNQ micros on the Free plan ($0.39 commission + $0.22 exchange + $0.09 clearing + $0.02 NFA). Round turn ≈ $1.44. Paid Tradovate plans are cheaper — override in Strategy Settings → Properties → Commission if needed.")
 
 i_slippage = input.int(
     1, "Slippage (Ticks)", minval=0,
@@ -42,6 +43,11 @@ i_slippage = input.int(
 // taken only between 8:00 AM and 12:00 PM ET. See TRADING WINDOW + DAILY CAP.
 
 // ── ORB Settings ─────────────────────────────────────────────────────────────
+i_orb_minutes = input.int(
+    15, "ORB Duration (min)", options=[5, 10, 15, 20, 30, 60],
+    group="📐 ORB Settings",
+    tooltip="Length of the opening range, anchored at 8:00 AM ET. 5 = 08:00–08:05, 15 = 08:00–08:15 (default), 60 = 08:00–09:00. The trade engine always runs on 5-minute candles regardless of this choice.")
+
 i_orb_end = input.int(
     1700, "ORB Box End Time (HHMM ET)", minval=800, maxval=2359,
     group="📐 ORB Settings",
@@ -82,19 +88,63 @@ i_col_vol_hi  = input.color(color.new(color.yellow, 0), "Volume Spike",     grou
 
 strategy("ORB Strategy V3", overlay=true, process_orders_on_close=true,
     pyramiding=2, max_bars_back=500, max_lines_count=500,
-    default_qty_type=strategy.fixed, default_qty_value=1)
+    default_qty_type=strategy.fixed, default_qty_value=1,
+    initial_capital=50000,
+    commission_type=strategy.commission.cash_per_contract, commission_value=0.72,
+    margin_long=5, margin_short=5)
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TIME UTILITIES
 // ─────────────────────────────────────────────────────────────────────────────
 
-int et_hour   = hour(time,   "America/New_York")
-int et_minute = minute(time, "America/New_York")
-int et_hhmm   = et_hour * 100 + et_minute
+int et_hour       = hour(time,   "America/New_York")
+int et_minute     = minute(time, "America/New_York")
+int et_hhmm       = et_hour * 100 + et_minute
+int et_min_of_day = et_hour * 60 + et_minute
 
-// The 8:00 AM 15m ORB candle = three 5m bars: 08:00, 08:05, 08:10
-bool in_orb_window = et_hhmm == 800 or et_hhmm == 805 or et_hhmm == 810
+// Selectable opening-range window, anchored at 08:00 ET. Minutes-of-day math
+// avoids HHMM carry bugs (e.g. 60m ends at 09:00). All durations are multiples
+// of 5 → each window is a whole number of 5m bars.
+int orb_start_min = 480                  // 08:00 ET
+int orb_end_min   = 480 + i_orb_minutes  // window end (exclusive)
+
+bool in_orb_window = et_min_of_day >= orb_start_min and et_min_of_day < orb_end_min
 bool new_session   = et_hour == 18 and et_minute == 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  CROSS-TIMEFRAME ORB  (drawing only — NEVER feeds the trade engine)
+//  Self-contained 5-minute rebuild of the same opening range, pulled below via
+//  request.security("5", …, lookahead_off) so the ORB box + midpoint render
+//  identically on any chart timeframe. Own 18:00 reset → can never capture the
+//  prior session's range (the bug that killed the old request.security build).
+// ─────────────────────────────────────────────────────────────────────────────
+
+f_orb_box() =>
+    var float fh   = na
+    var float fl   = na
+    var float fm   = na
+    var int   ftm  = na    // time of the 08:00 bar (box left edge)
+    var bool  fset = false
+    int fhh  = hour(time,   "America/New_York")
+    int fmm  = minute(time, "America/New_York")
+    int fmod = fhh * 60 + fmm
+    if fhh == 18 and fmm == 0
+        fh   := na
+        fl   := na
+        fm   := na
+        ftm  := na
+        fset := false
+    if fmod == orb_start_min and not fset
+        fh  := high
+        fl  := low
+        ftm := time
+    else if fmod > orb_start_min and fmod < orb_end_min and not fset and not na(fh)
+        fh := math.max(fh, high)
+        fl := math.min(fl, low)
+    if fmod == orb_end_min - 5 and not fset and not na(fh)
+        fm   := (fh + fl) / 2
+        fset := true
+    [fh, fl, fm, ftm, fset]
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TRADING WINDOW + DAILY CAP  (global — identical for every instrument)
@@ -212,20 +262,20 @@ if new_session
     ceil_line_l      := na
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  ORB BUILD  (native 5m aggregation over the 08:00–08:15 window)
-//  Accumulate high/low across the three 5m bars (08:00, 08:05, 08:10);
-//  latch complete at the 08:10 close (= 8:15) so the range is final before use.
+//  ORB BUILD  (native 5m aggregation over the selected 08:00-based window)
+//  Accumulate high/low across every 5m bar in [orb_start_min, orb_end_min);
+//  latch complete on the final in-window bar so the range is set before use.
 // ─────────────────────────────────────────────────────────────────────────────
 
-if et_hhmm == 800 and not orb_set
+if et_min_of_day == orb_start_min and not orb_set
     orb_high   := high
     orb_low    := low
     orb_anchor := bar_index
-else if (et_hhmm == 805 or et_hhmm == 810) and not orb_set and not na(orb_high)
+else if et_min_of_day > orb_start_min and et_min_of_day < orb_end_min and not orb_set and not na(orb_high)
     orb_high := math.max(orb_high, high)
     orb_low  := math.min(orb_low,  low)
 
-if et_hhmm == 810 and not orb_set and not na(orb_high)
+if et_min_of_day == orb_end_min - 5 and not orb_set and not na(orb_high)
     orb_mid := (orb_high + orb_low) / 2
     orb_set := true
 
@@ -468,18 +518,25 @@ if pos_closed
     ceil_line_l      := na
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  ORB VISUALS  (box + midpoint, extending to i_orb_end)
+//  ORB VISUALS  (box + midpoint — time-anchored so they render on ANY timeframe)
+//  Values come from the cross-timeframe 5m calc (NOT the native engine ORB), so
+//  the box is identical whether the chart is 1m, 5m, 15m, or 1h. Time coordinates
+//  (xloc.bar_time) place the box correctly regardless of the chart's bar size.
 // ─────────────────────────────────────────────────────────────────────────────
 
-if orb_set and na(orb_box_obj) and not na(orb_anchor)
-    orb_box_obj  := box.new(orb_anchor, orb_high, bar_index + 1, orb_low,
+[box_oh, box_ol, box_om, box_otime, box_oset] = request.security(
+    syminfo.tickerid, "5", f_orb_box(),
+    gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+if box_oset and na(orb_box_obj) and not na(box_otime)
+    orb_box_obj  := box.new(box_otime, box_oh, time_close, box_ol, xloc=xloc.bar_time,
                              border_color=i_col_orb_box, bgcolor=i_col_orb_box)
-    orb_mid_line := line.new(orb_anchor, orb_mid, bar_index + 1, orb_mid,
+    orb_mid_line := line.new(box_otime, box_om, time_close, box_om, xloc=xloc.bar_time,
                               color=i_col_orb_mid, style=line.style_dashed, width=1)
 
-if orb_set and not na(orb_box_obj) and et_hhmm <= i_orb_end
-    box.set_right(orb_box_obj, bar_index + 1)
-    line.set_x2(orb_mid_line, bar_index + 1)
+if box_oset and not na(orb_box_obj) and et_hhmm <= i_orb_end
+    box.set_right(orb_box_obj, time_close)
+    line.set_x2(orb_mid_line, time_close)
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  LEVEL LINE VISUALS  (liquidity level while waiting, floor/ceiling once locked)

@@ -2,15 +2,16 @@
 
 ## Overview
 
-TradingView Pine Script indicator + strategy. 15-min ORB variation starting at 8:00 AM ET.
-Instruments: MNQ, NQ, ES, MES, MGC.
+TradingView Pine Script strategy. Opening-range breakout starting at 8:00 AM ET, with a
+**user-selectable ORB duration** (5/10/15/20/30/60 min). Default reference instruments: MES & MNQ.
+Backtest defaults baked into `strategy()`: $50,000 capital, $0.72/side commission, 5% margin.
 
 ---
 
 ## 1. ORB Definition
 
-- **Timeframe**: 5-min execution chart
-- **ORB candle**: the 8:00–8:15 AM ET window — built natively from the three 5m bars (08:00, 08:05, 08:10), high/low aggregated, finalized at the 08:10 close
+- **Timeframe**: 5-min execution chart (trade here). The ORB box + midpoint also render on **any** chart timeframe (see Section 6)
+- **ORB candle**: the 8:00 AM ET window — **length user-selectable** via `i_orb_minutes` (5/10/15/20/30/60 min, default 15 = 08:00–08:15). Built natively by aggregating every 5m bar in `[orb_start_min, orb_end_min)` (minutes-of-day math, `orb_start_min = 480`), finalized on the final in-window bar (`orb_end_min - 5`)
 - **ORB high**: wick high of 8:00 AM candle
 - **ORB low**: wick low of 8:00 AM candle
 - **ORB midpoint**: (ORB high + ORB low) / 2
@@ -98,8 +99,8 @@ Rules are identical for every instrument — no per-instrument max-trades or tim
 
 ## 6. Visual Elements
 
-- ORB box: shaded rectangle, extends rightward until `i_orb_end` (default 17:00 ET)
-- ORB midpoint: dashed horizontal line, extends to `i_orb_end`
+- ORB box: shaded rectangle, extends rightward until `i_orb_end` (default 17:00 ET). **Renders on any chart timeframe** — sourced from a self-contained 5m calc (`f_orb_box()`) via `request.security("5", …, lookahead_off)` and drawn with `xloc.bar_time` / `time_close`, so the box is identical on 1m/5m/15m/1h. Trade execution + setup lines stay 5m-only
+- ORB midpoint: dashed horizontal line, extends to `i_orb_end` (also cross-timeframe)
 - Liquidity / structural level: dashed line drawn after the breakout, while waiting for the revisit; cleared once revisited
 - Floor / ceiling: dashed line drawn once locked; moves as the level transfers
 - Entry/exit: TradingView's built-in strategy markers (no custom entry/SL/TP lines)
@@ -114,8 +115,9 @@ Rules are identical for every instrument — no per-instrument max-trades or tim
 
 | Option | Group | Default |
 |--------|-------|---------|
-| Commission per side ($) | Backtest Settings | 2.00 (reference only) |
-| Slippage (ticks) | Backtest Settings | 1 (reference only) |
+| Commission per side ($) — MES/MNQ | Backtest Settings | 0.72 (display ref; live value baked into `strategy()`) |
+| Slippage (ticks) | Backtest Settings | 1 (reference only; not baked) |
+| ORB Duration (min) | ORB Settings | 15 — dropdown: 5/10/15/20/30/60 |
 | ORB Box End Time (HHMM ET) | ORB Settings | 1700 |
 | Move SL to Breakeven at 1R | ORB Settings | ON |
 | Enable Custom SL/TP Multiples | ORB Settings | OFF |
@@ -128,6 +130,9 @@ Rules are identical for every instrument — no per-instrument max-trades or tim
 | Show Prior Day High/Low | Visuals | OFF |
 | Volume Avg Lookback (bars) | Visuals | 20 |
 | All color inputs | Colors | Various |
+
+**Baked into `strategy()` (literal constants — these actually apply in the backtest):**
+`initial_capital=50000` · `commission_type=cash_per_contract` · `commission_value=0.72` (Tradovate MES/MNQ all-in: $0.39 comm + $0.22 exch + $0.09 clearing + $0.02 NFA) · `margin_long=5` · `margin_short=5` (so $50K can afford 1 MNQ ≈ $61.7K notional). Manual Properties overrides mask these — reset Properties to **Defaults** to apply.
 
 ---
 
@@ -159,7 +164,7 @@ Script is written in **Pine Script v6** (`//@version=6`). Key v5→v6 difference
 
 | Issue | v5 | v6 Fix |
 |-------|----|--------|
-| `strategy()` commission/slippage | `commission_value=i_commission` worked | Requires `const float/int` — inputs not allowed. Remove from `strategy()`. Set via TradingView **Strategy Settings → Properties** tab instead. |
+| `strategy()` commission/slippage | `commission_value=i_commission` worked | Requires `const float/int` — **inputs** not allowed, but **literal constants are**. Now baked in: `commission_value=0.72`, `commission_type=strategy.commission.cash_per_contract`. (Slippage still set in Properties.) |
 | Multi-line boolean with `and` | `and` at start of continuation line worked | `and` at start OR end of line both fail (CE10013/CE10156). Use **intermediate bool variables** — one expression per line. |
 | `math.avg()` | `math.avg(high, low)` | Removed. Use `(high + low) / 2`. |
 | `barmerge.lookahead_on` | Used in `request.security()` | Deprecated. Use `barmerge.lookahead_off`. Safe here because `[1]` indexing already reads confirmed prior-bar data. |
@@ -168,13 +173,14 @@ Script is written in **Pine Script v6** (`//@version=6`). Key v5→v6 difference
 | Local risk variable | `_r = t_sl - t_entry` inside `if` | Must be explicit: `float _r = t_sl - t_entry` |
 
 ### Commission / Slippage Workflow
-Since `strategy()` requires compile-time constants, users set these in TradingView UI:
-1. Add strategy to chart
-2. Click ⚙️ gear icon on the strategy name
-3. Go to **Properties** tab
-4. Set **Commission** ($ per contract) and **Slippage** (ticks)
+`strategy()` accepts compile-time **constants** (literals), just not inputs:
+- **Commission** — baked in as a literal: `commission_type=strategy.commission.cash_per_contract`, `commission_value=0.72` ($0.72/side Tradovate MES/MNQ all-in). Applies in-backtest; overridable in Properties.
+- **Initial capital / margin** — also baked: `initial_capital=50000`, `margin_long=5`, `margin_short=5`.
+- **Slippage** — still set in Properties → ticks (not baked).
 
-The `i_commission` and `i_slippage` inputs in the script are retained as reference labels only (tooltips explain this).
+⚠️ Manual changes in the Properties tab **override** these baked-in defaults and persist. After updating the script, use Properties → **Defaults → Reset settings** so the new values take effect.
+
+The `i_commission` / `i_slippage` inputs remain as display references only (tooltips explain this).
 
 ---
 
@@ -202,5 +208,11 @@ Signal engine rewritten 2026-06-10. The old grading/pullback-depth/pivot-sweep s
 - **EOD flatten**: `if et_hhmm == 1645 and strategy.position_size != 0: strategy.close_all()`, placed after entries and before BE management; forces any open position closed by 4:45 PM ET regardless of SL/TP/BE state
 - **Reverse signals**: `i_reverse_signals` (default OFF). When ON, `buy_signal` (ceiling break) opens a SHORT and `sell_signal` (floor break) opens a LONG instead — direction is fully inverted. SL/TP are recomputed for the actual (reversed) direction rather than reused from the original-direction formulas: non-custom SL becomes `close ∓ R` (mirrors `open` not being on the correct side post-flip) and TP becomes `close ± 2R`; custom SL/TP multiples apply the same way, just on the flipped side. `s1_is_long`/`s2_is_long` reflect the actual position direction so BE management works unchanged
 - `new_session = et_hour == 18 and et_minute == 0` — same as V1
-- Commission/slippage: set in TradingView Properties tab (same as V1)
+- Commission: baked into `strategy()` ($0.72/side); slippage still set in Properties (see Section 9)
 - **Removed**: grade inputs/colors/labels, `grade_str()`, `grade_col()`, pullback-depth vars, `ta.pivothigh/pivotlow` swing detection, swing markers, old C1/C2 breakout rules
+
+### V3.1 additions (2026-06-16)
+
+- **Selectable ORB duration**: `i_orb_minutes` dropdown (5/10/15/20/30/60 min). Engine window generalized from hardcoded `800/805/810` to minutes-of-day `[orb_start_min, orb_end_min)` where `orb_start_min=480`, `orb_end_min=480+i_orb_minutes`; finalizes on the `orb_end_min-5` bar. `in_orb_window` + the breakout gate auto-follow. Engine stays native 5m
+- **Cross-timeframe ORB box**: box + midpoint now render on any chart timeframe. Values come from a self-contained `f_orb_box()` pulled via `request.security(syminfo.tickerid, "5", …, lookahead_off)` (own 18:00 reset → no prior-session capture, unlike the old build); drawn with `xloc.bar_time` + `time_close`. Trade engine + setup lines stay 5m-only (visual-only consistency). A strategy still *executes* on the chart's TF — trade/read results on 5m; other TFs are look-only
+- **Backtest defaults baked into `strategy()`**: `initial_capital=50000`, `commission_type=cash_per_contract` + `commission_value=0.72` (Tradovate MES/MNQ all-in), `margin_long=5`/`margin_short=5` (so $50K affords 1 MNQ ≈ $61.7K notional). Reverses the old "no commission in `strategy()`" note — literal constants compile fine; only inputs don't. Manual Properties overrides persist → reset to Defaults to apply

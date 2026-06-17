@@ -188,12 +188,12 @@ The `i_commission` / `i_slippage` inputs remain as display references only (tool
 
 ## 10. File Location
 
-- Script: `orb_strategy_v3.pine`
+- Script: `The_Orb_Experiment.pine`
 - GitHub repo: `orb-strategy` (private)
 
 ---
 
-## 11. V3 Script Notes
+## 11. Script Notes
 
 Signal engine rewritten 2026-06-10. The old grading/pullback-depth/pivot-sweep system was removed entirely.
 
@@ -209,11 +209,11 @@ Signal engine rewritten 2026-06-10. The old grading/pullback-depth/pivot-sweep s
 - **Custom SL/TP multiples**: gated on `i_custom_sl_tp` (default OFF). When ON, `_sl`/`_tp` at entry are computed as `close ∓ i_sl_mult * _r` / `close ± i_tp_mult * _r` instead of `open` / `close ± 2*_r`. Defaults (1.0 / 2.0) reproduce original behavior. Composes cleanly with `i_move_sl_to_be` — BE distance (`|entry - sl|`) scales with `i_sl_mult` automatically
 - **EOD flatten**: `if et_hhmm == 1645 and strategy.position_size != 0: strategy.close_all()`, placed after entries and before BE management; forces any open position closed by 4:45 PM ET regardless of SL/TP/BE state
 - **Reverse signals**: `i_reverse_signals` (default OFF). When ON, `buy_signal` (ceiling break) opens a SHORT and `sell_signal` (floor break) opens a LONG instead — direction is fully inverted. SL/TP are recomputed for the actual (reversed) direction rather than reused from the original-direction formulas: non-custom SL becomes `close ∓ R` (mirrors `open` not being on the correct side post-flip) and TP becomes `close ± 2R`; custom SL/TP multiples apply the same way, just on the flipped side. `s1_is_long`/`s2_is_long` reflect the actual position direction so BE management works unchanged
-- `new_session = et_hour == 18 and et_minute == 0` — same as V1
+- `new_session = et_hour == 18 and et_minute == 0`
 - Commission + slippage: baked into `strategy()` ($0.80/side, 1-tick slippage); see Section 9
 - **Removed**: grade inputs/colors/labels, `grade_str()`, `grade_col()`, pullback-depth vars, `ta.pivothigh/pivotlow` swing detection, swing markers, old C1/C2 breakout rules
 
-### V3.1 additions (2026-06-16)
+### Additions (2026-06-16)
 
 - **Selectable ORB duration**: `i_orb_minutes` dropdown (5/10/15/20/30/60 min). Engine window generalized from hardcoded `800/805/810` to minutes-of-day `[orb_start_min, orb_end_min)` where `orb_start_min=480`, `orb_end_min=480+i_orb_minutes`; finalizes on the `orb_end_min-5` bar. `in_orb_window` + the breakout gate auto-follow. Engine stays native 5m
 - **Cross-timeframe ORB box**: box + midpoint now render on any chart timeframe. Values come from a self-contained `f_orb_box()` pulled via `request.security(syminfo.tickerid, "5", …, lookahead_off)` (own 18:00 reset → no prior-session capture, unlike the old build); drawn with `xloc.bar_time` + `time_close`. Trade engine + setup lines stay 5m-only (visual-only consistency). A strategy still *executes* on the chart's TF — trade/read results on 5m; other TFs are look-only

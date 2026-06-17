@@ -1,7 +1,7 @@
 //@version=6
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  ORB Strategy V3  |  Pine Script v6
+//  The ORB Experiment  |  Pine Script v6
 //  Chart     : trade on 5-minute; ORB box + midpoint also render on ANY timeframe
 //  ORB Source: 08:00 AM ET window, length user-selectable (5/10/15/20/30/60 min)
 //  Session   : 8:00 AM ET open  |  Reset: 18:00 ET
@@ -100,7 +100,7 @@ i_min_trades = input.int(30, "Min Trades (sample gate)", minval=1, group="🔬 O
 i_min_losses = input.int(5, "Min Losing Trades (sample gate)", minval=0, group="🔬 Optimizer",
     tooltip="Cells with fewer losing trades than this are greyed out. Calmar and drawdown metrics are unstable when losses are too few — the denominator is near zero and any single loss dominates the result.")
 
-strategy("ORB Strategy V3", overlay=true, process_orders_on_close=true,
+strategy("The ORB Experiment", overlay=true, process_orders_on_close=true,
     pyramiding=2, max_bars_back=500, max_lines_count=500,
     default_qty_type=strategy.fixed, default_qty_value=1,
     initial_capital=50000,
@@ -683,7 +683,9 @@ if i_optimize
     // recalcs). We only repopulate its cells on the render bar below.
     if na(opt_tbl)
         opt_tbl := table.new(position.middle_center, N_TP + 1, N_SL + 1,
-             border_width=1, frame_width=1, frame_color=color.gray)
+             border_width=1, border_color=color.new(color.gray, 50),
+             frame_width=2, frame_color=color.new(color.gray, 0),
+             bgcolor=color.new(color.black, 0))
     // advance any open simulated trades — fills modelled like the real engine:
     //   entry  = signal close ± slippage (market, adverse)
     //   TP hit = exact TP level (limit orders are NOT slipped)
@@ -853,18 +855,18 @@ if i_optimize
                 color _bg = na
                 color _tc = na
                 if not _eligible
-                    _bg := color.new(color.gray, 60)
-                    _tc := color.new(color.gray, 20)
+                    _bg := color.new(color.gray, 0)
+                    _tc := color.new(color.white, 60)
                 else if na(_v)
-                    _bg := color.new(color.gray, 60)
-                    _tc := color.new(color.gray, 20)
+                    _bg := color.new(color.gray, 0)
+                    _tc := color.new(color.white, 60)
                 else
                     // normalise 0→1 (best=1, worst=0)
                     float _norm = (_v - _grid_min) / _range
-                    // blend: green (0,255,0) at norm=1, red (255,0,0) at norm=0
+                    // blend: green (0,255,0) at norm=1, red (255,0,0) at norm=0 — fully opaque
                     int _r_ch = int(255 * (1.0 - _norm))
                     int _g_ch = int(255 * _norm)
-                    _bg := color.rgb(_r_ch, _g_ch, 0, 30)
+                    _bg := color.rgb(_r_ch, _g_ch, 0, 0)
                     _tc := color.white
 
                 table.cell(opt_tbl, c, r, _tx, text_size=size.small, text_color=_tc, bgcolor=_bg)

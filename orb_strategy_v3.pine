@@ -88,11 +88,17 @@ i_col_vol_hi  = input.color(color.new(color.yellow, 0), "Volume Spike",     grou
 
 // ── Optimizer ─────────────────────────────────────────────────────────────────
 i_optimize = input.bool(false, "Show SL/TP Optimization Table", group="🔬 Optimizer",
-    tooltip="When ON, draws a grid that tests every SL×TP multiple combo on the SAME entries the strategy takes, then prints a scoreboard (best cell highlighted green). R = trigger candle's |close-open| (like Custom SL/TP). Respects the BE-at-1R toggle + 4:45 EOD flatten so it matches live behaviour. Does NOT change the strategy's own trades — advisory only. Tip: shorten the backtest date range if it runs slowly.")
+    tooltip="When ON, draws a grid that tests every SL×TP multiple combo on the SAME entries the strategy takes. R = initial stop risk (|entry − SL| × point value). Respects the BE-at-1R toggle + 4:45 EOD flatten. Does NOT change the strategy's own trades — advisory only. Tip: shorten the backtest date range if it runs slowly.")
 
-i_goal = input.string("Most Profit", "Optimization Goal", group="🔬 Optimizer",
-    options=["Most Profit", "Highest Win Rate", "Best Profit/Loss Ratio", "Best Sortino Ratio", "Minimize Drawdown"],
-    tooltip="Which metric picks the highlighted 'best' combo. Profit/Loss Ratio = profit factor (gross win $ ÷ gross loss $). Sortino = mean trade $ ÷ downside deviation. Minimize Drawdown = smallest equity dip wins.")
+i_goal = input.string("Expectancy (R)", "Optimization Goal", group="🔬 Optimizer",
+    options=["Expectancy (R)", "Calmar (R)", "Win Rate %"],
+    tooltip="Which metric drives the heatmap coloring and best-cell detection.\n• Expectancy (R): avg R earned per trade — the core edge metric.\n• Calmar (R): total R ÷ max drawdown R — rewards consistent gains, punishes blow-up combos.\n• Win Rate %: % of trades that closed profitable.")
+
+i_min_trades = input.int(30, "Min Trades (sample gate)", minval=1, group="🔬 Optimizer",
+    tooltip="Cells with fewer than this many trades are greyed out and ineligible for 'best'. Rule of thumb: 30 trades gives ±9 pp standard error on win rate (95% CI); 50 is comfortable; 100 is publication-grade. Below 30 the ranking is largely noise.")
+
+i_min_losses = input.int(5, "Min Losing Trades (sample gate)", minval=0, group="🔬 Optimizer",
+    tooltip="Cells with fewer losing trades than this are greyed out. Calmar and drawdown metrics are unstable when losses are too few — the denominator is near zero and any single loss dominates the result.")
 
 strategy("ORB Strategy V3", overlay=true, process_orders_on_close=true,
     pyramiding=2, max_bars_back=500, max_lines_count=500,
@@ -637,33 +643,35 @@ bgcolor(i_show_volume and not day_complete and (buy_signal or sell_signal) and v
 // ─────────────────────────────────────────────────────────────────────────────
 //  SL/TP OPTIMIZER  (advisory grid — gated on i_optimize; NEVER changes trades)
 //  Tests every SL×TP multiple combo (SL 0.2→3.0, TP 0.2→5.0, step 0.2 = 15×25)
-//  on the SAME entries the live strategy takes. R = |close−open| of the trigger
-//  candle. Mirrors live exits: BE-at-1R (if i_move_sl_to_be) + 4:45 EOD flatten.
+//  on the SAME entries the live strategy takes. R = |close−open| of trigger candle.
+//  Metrics are R-based: 1R = |entry−SL| × pointvalue, fixed at entry (BE moves don't
+//  change it). Expectancy(R) = avg R/trade. Calmar(R) = total R ÷ max drawdown R.
+//  Sample gate: cells with < i_min_trades or < i_min_losses are greyed out (ineligible).
+//  Heatmap: relative green→red gradient. Plateau ★ = all 4 neighbors within 10%.
 //  Intrabar tie (SL & TP both inside one bar) resolves to SL (pessimistic).
-//  Net $/trade includes commission (i_commission ×2 sides) + slippage (i_slippage ×2).
 // ─────────────────────────────────────────────────────────────────────────────
 
 int N_SL     = 15
 int N_TP     = 25
 int N_COMBOS = 375
 
-var a_open   = array.new_bool (N_COMBOS, false)
-var a_entry2 = array.new_float(N_COMBOS, na)
-var a_efill  = array.new_float(N_COMBOS, na)
-var a_sl2    = array.new_float(N_COMBOS, na)
-var a_tp2    = array.new_float(N_COMBOS, na)
-var a_risk   = array.new_float(N_COMBOS, na)
-var a_long   = array.new_bool (N_COMBOS, false)
-var a_bedone = array.new_bool (N_COMBOS, false)
-var a_trades = array.new_int  (N_COMBOS, 0)
-var a_wins   = array.new_int  (N_COMBOS, 0)
-var a_gprof  = array.new_float(N_COMBOS, 0.0)
-var a_gloss  = array.new_float(N_COMBOS, 0.0)
-var a_sumr   = array.new_float(N_COMBOS, 0.0)
-var a_negsq  = array.new_float(N_COMBOS, 0.0)
-var a_equity = array.new_float(N_COMBOS, 0.0)
-var a_peak   = array.new_float(N_COMBOS, 0.0)
-var a_maxdd  = array.new_float(N_COMBOS, 0.0)
+var a_open    = array.new_bool (N_COMBOS, false)
+var a_entry2  = array.new_float(N_COMBOS, na)
+var a_efill   = array.new_float(N_COMBOS, na)
+var a_sl2     = array.new_float(N_COMBOS, na)
+var a_tp2     = array.new_float(N_COMBOS, na)
+var a_risk    = array.new_float(N_COMBOS, na)   // initial stop risk in price pts (|entry-SL|)
+var a_initR   = array.new_float(N_COMBOS, na)   // 1R in dollars at entry (risk_pts × pointvalue)
+var a_long    = array.new_bool (N_COMBOS, false)
+var a_bedone  = array.new_bool (N_COMBOS, false)
+var a_trades  = array.new_int  (N_COMBOS, 0)
+var a_wins    = array.new_int  (N_COMBOS, 0)
+var a_losses  = array.new_int  (N_COMBOS, 0)    // losing trade count for sample gate
+// R-based accumulators (all 3 metrics computed always)
+var a_sumR    = array.new_float(N_COMBOS, 0.0)  // sum of R multiples (for Expectancy R)
+var a_peakR   = array.new_float(N_COMBOS, 0.0)  // peak R-equity (for Calmar R)
+var a_equityR = array.new_float(N_COMBOS, 0.0)  // running R-equity curve
+var a_maxddR  = array.new_float(N_COMBOS, 0.0)  // max drawdown in R
 var int   opt_open_count = 0
 var table opt_tbl        = na
 
@@ -678,7 +686,8 @@ if i_optimize
     //   TP hit = exact TP level (limit orders are NOT slipped)
     //   SL/BE  = stop level ± slippage (stop orders ARE slipped, adverse)
     //   EOD    = bar close ± slippage (market, adverse)
-    // Commission = i_commission × 2 sides. SL/TP levels are tick-snapped at entry.
+    // P&L expressed in R multiples: 1R = initial |entry−SL| × pointvalue (fixed at entry).
+    // Commission (2×) and slippage are subtracted in dollar terms then converted to R.
     if opt_open_count > 0
         float _slip = i_slippage * syminfo.mintick
         for k = 0 to N_COMBOS - 1
@@ -688,7 +697,8 @@ if i_optimize
                 float _ef    = array.get(a_efill, k)
                 float _slk   = array.get(a_sl2, k)
                 float _tpk   = array.get(a_tp2, k)
-                float _rk    = array.get(a_risk, k)
+                float _rk    = array.get(a_risk, k)        // price pts of initial stop
+                float _1R    = array.get(a_initR, k)       // 1R in dollars
                 bool  _slhit = _isl ? low <= _slk : high >= _slk
                 bool  _tphit = _isl ? high >= _tpk : low <= _tpk
                 float _xfill = na
@@ -706,22 +716,22 @@ if i_optimize
                 if na(_xfill) and (et_hhmm >= 1645 or new_session)
                     _xfill := _isl ? close - _slip : close + _slip
                 if not na(_xfill)
-                    float _pts = _isl ? _xfill - _ef : _ef - _xfill
-                    float _net = _pts * syminfo.pointvalue - 2.0 * i_commission
+                    float _pts  = _isl ? _xfill - _ef : _ef - _xfill
+                    float _net  = _pts * syminfo.pointvalue - 2.0 * i_commission
+                    // convert net $ to R multiples (1R = initial risk in $)
+                    float _netR = _1R > 0 ? _net / _1R : 0.0
                     array.set(a_trades, k, array.get(a_trades, k) + 1)
                     if _net > 0
-                        array.set(a_wins,  k, array.get(a_wins, k) + 1)
-                        array.set(a_gprof, k, array.get(a_gprof, k) + _net)
+                        array.set(a_wins, k, array.get(a_wins, k) + 1)
                     else
-                        array.set(a_gloss, k, array.get(a_gloss, k) - _net)
-                        array.set(a_negsq, k, array.get(a_negsq, k) + _net * _net)
-                    array.set(a_sumr, k, array.get(a_sumr, k) + _net)
-                    float _eq = array.get(a_equity, k) + _net
-                    array.set(a_equity, k, _eq)
-                    float _pk = math.max(array.get(a_peak, k), _eq)
-                    array.set(a_peak,  k, _pk)
-                    array.set(a_maxdd, k, math.max(array.get(a_maxdd, k), _pk - _eq))
-                    array.set(a_open,  k, false)
+                        array.set(a_losses, k, array.get(a_losses, k) + 1)
+                    array.set(a_sumR, k, array.get(a_sumR, k) + _netR)
+                    float _eqR = array.get(a_equityR, k) + _netR
+                    array.set(a_equityR, k, _eqR)
+                    float _pkR = math.max(array.get(a_peakR, k), _eqR)
+                    array.set(a_peakR,  k, _pkR)
+                    array.set(a_maxddR, k, math.max(array.get(a_maxddR, k), _pkR - _eqR))
+                    array.set(a_open,   k, false)
                     opt_open_count := opt_open_count - 1
 
     // open a fresh sim per combo on a real entry — tick-snap SL/TP to the order
@@ -739,11 +749,14 @@ if i_optimize
             float _tpraw = opt_islong ? opt_entry + _tpm*opt_R : opt_entry - _tpm*opt_R
             float _slsn  = math.round(_slraw / _mt) * _mt
             float _tpsn  = math.round(_tpraw / _mt) * _mt
+            float _riskPts = math.abs(opt_entry - _slsn)
+            float _1Rdol   = _riskPts * syminfo.pointvalue  // 1R in dollars, fixed at entry
             array.set(a_open,   k, true)
             array.set(a_entry2, k, opt_entry)
             array.set(a_efill,  k, _efl)
             array.set(a_long,   k, opt_islong)
-            array.set(a_risk,   k, math.abs(opt_entry - _slsn))
+            array.set(a_risk,   k, _riskPts)
+            array.set(a_initR,  k, _1Rdol)
             array.set(a_bedone, k, false)
             array.set(a_sl2, k, _slsn)
             array.set(a_tp2, k, _tpsn)
@@ -752,38 +765,38 @@ if i_optimize
     // Repopulate the scoreboard on the last bar OR the end of confirmed history,
     // so it shows reliably on live charts too (not only right after a bar close).
     if barstate.islast or barstate.islastconfirmedhistory
+        // ── Step 1: compute per-cell metric values and find best eligible cell ──
+        // All 3 metrics are always computed; the goal dropdown picks which drives coloring.
+        // Sample gate: cell is eligible only if trades >= i_min_trades AND losses >= i_min_losses.
+        float[] a_metric = array.new_float(N_COMBOS, na)
         int   _best_k = -1
         float _best_v = na
-        for k = 0 to N_COMBOS - 1
-            int   _n = array.get(a_trades, k)
-            float _v = na
-            if _n > 0
-                if i_goal == "Most Profit"
-                    _v := array.get(a_equity, k)
-                else if i_goal == "Highest Win Rate"
-                    _v := 100.0 * array.get(a_wins, k) / _n
-                else if i_goal == "Best Profit/Loss Ratio"
-                    float _gl = array.get(a_gloss, k)
-                    float _gp = array.get(a_gprof, k)
-                    _v := _gl > 0 ? _gp / _gl : (_gp > 0 ? 1e9 : na)
-                else if i_goal == "Best Sortino Ratio"
-                    float _dd = math.sqrt(array.get(a_negsq, k) / _n)
-                    float _mn = array.get(a_sumr, k) / _n
-                    _v := _dd > 0 ? _mn / _dd : (_mn > 0 ? 1e9 : na)
-                else
-                    _v := array.get(a_maxdd, k)
-            bool _better = false
-            if not na(_v)
-                if na(_best_v)
-                    _better := true
-                else if i_goal == "Minimize Drawdown"
-                    _better := _v < _best_v
-                else
-                    _better := _v > _best_v
-            if _better
-                _best_v := _v
-                _best_k := k
+        float _grid_min = na
+        float _grid_max = na
 
+        for k = 0 to N_COMBOS - 1
+            int   _n  = array.get(a_trades, k)
+            int   _nl = array.get(a_losses, k)
+            bool  _eligible = _n >= i_min_trades and _nl >= i_min_losses
+            float _v = na
+            if _eligible
+                if i_goal == "Expectancy (R)"
+                    _v := array.get(a_sumR, k) / _n
+                else if i_goal == "Calmar (R)"
+                    float _dd = array.get(a_maxddR, k)
+                    float _tot = array.get(a_equityR, k)
+                    _v := _dd > 0 ? _tot / _dd : (_tot > 0 ? 1e9 : na)
+                else  // Win Rate %
+                    _v := 100.0 * array.get(a_wins, k) / _n
+            array.set(a_metric, k, _v)
+            if not na(_v)
+                _grid_min := na(_grid_min) ? _v : math.min(_grid_min, _v)
+                _grid_max := na(_grid_max) ? _v : math.max(_grid_max, _v)
+                if na(_best_v) or _v > _best_v
+                    _best_v := _v
+                    _best_k := k
+
+        // ── Step 2: header ───────────────────────────────────────────────────────
         int    _bsl = _best_k >= 0 ? int(_best_k / N_TP) : 0
         int    _btp = _best_k >= 0 ? _best_k % N_TP      : 0
         string _hdr = "GOAL: " + i_goal + "\nBEST  SL×" + str.tostring(0.2*(_bsl+1), "#.#") + "  TP×" + str.tostring(0.2*(_btp+1), "#.#")
@@ -793,28 +806,65 @@ if i_optimize
         for r = 1 to N_SL
             table.cell(opt_tbl, 0, r, "SL "+str.tostring(0.2*r, "#.#"), text_size=size.tiny, text_color=color.white, bgcolor=color.new(color.gray, 20))
 
+        // ── Step 3: draw cells with heatmap + plateau ★ ──────────────────────────
+        float _range = (_grid_max - _grid_min) > 0 ? (_grid_max - _grid_min) : 1.0
+
         for r = 1 to N_SL
             for c = 1 to N_TP
-                int    _k = (r - 1) * N_TP + (c - 1)
-                int    _n = array.get(a_trades, _k)
-                string _tx = "—"
-                if _n > 0
-                    if i_goal == "Most Profit"
-                        _tx := str.tostring(array.get(a_equity, _k), "#")
-                    else if i_goal == "Highest Win Rate"
-                        _tx := str.tostring(100.0 * array.get(a_wins, _k) / _n, "#") + "%"
-                    else if i_goal == "Best Profit/Loss Ratio"
-                        float _gl = array.get(a_gloss, _k)
-                        float _gp = array.get(a_gprof, _k)
-                        _tx := _gl > 0 ? str.tostring(_gp / _gl, "#.##") : (_gp > 0 ? "∞" : "—")
-                    else if i_goal == "Best Sortino Ratio"
-                        float _dd = math.sqrt(array.get(a_negsq, _k) / _n)
-                        float _mn = array.get(a_sumr, _k) / _n
-                        _tx := _dd > 0 ? str.tostring(_mn / _dd, "#.##") : (_mn > 0 ? "∞" : "—")
+                int   _k  = (r - 1) * N_TP + (c - 1)
+                int   _n  = array.get(a_trades, _k)
+                float _v  = array.get(a_metric, _k)
+                bool  _eligible = _n >= i_min_trades and array.get(a_losses, _k) >= i_min_losses
+
+                // cell display text — two lines: metric + trade count
+                string _tx = na
+                if not _eligible
+                    _tx := "—\n(n=" + str.tostring(_n) + ")"
+                else
+                    if i_goal == "Expectancy (R)"
+                        _tx := (not na(_v) ? str.tostring(_v, "#.##") + "R" : "—") + "\n(n=" + str.tostring(_n) + ")"
+                    else if i_goal == "Calmar (R)"
+                        _tx := (not na(_v) ? (_v >= 1e8 ? "∞" : str.tostring(_v, "#.##")) + "R" : "—") + "\n(n=" + str.tostring(_n) + ")"
                     else
-                        _tx := str.tostring(array.get(a_maxdd, _k), "#")
-                color _bg = _k == _best_k ? color.new(color.green, 0) : color.new(color.black, 55)
-                table.cell(opt_tbl, c, r, _tx, text_size=size.tiny, text_color=color.white, bgcolor=_bg)
+                        _tx := (not na(_v) ? str.tostring(_v, "#.#") + "%" : "—") + "\n(n=" + str.tostring(_n) + ")"
+
+                // plateau detection: cell is stable if all 4 orthogonal neighbors
+                // are within 10% of its value (only for eligible cells)
+                bool _stable = false
+                if _eligible and not na(_v) and math.abs(_v) > 0
+                    float _thresh = math.abs(_v) * 0.10
+                    // neighbor indices (row ±1, col ±1 in grid → k ±N_TP, k ±1)
+                    int _kU = (r - 2) * N_TP + (c - 1)  // up
+                    int _kD =  r      * N_TP + (c - 1)  // down
+                    int _kL = (r - 1) * N_TP + (c - 2)  // left
+                    int _kR = (r - 1) * N_TP +  c        // right
+                    bool _uOk = r == 1  or (not na(array.get(a_metric, _kU)) and math.abs(array.get(a_metric, _kU) - _v) <= _thresh)
+                    bool _dOk = r == N_SL or (not na(array.get(a_metric, _kD)) and math.abs(array.get(a_metric, _kD) - _v) <= _thresh)
+                    bool _lOk = c == 1  or (not na(array.get(a_metric, _kL)) and math.abs(array.get(a_metric, _kL) - _v) <= _thresh)
+                    bool _rOk = c == N_TP or (not na(array.get(a_metric, _kR)) and math.abs(array.get(a_metric, _kR) - _v) <= _thresh)
+                    _stable := _uOk and _dOk and _lOk and _rOk
+                if _stable
+                    _tx := _tx + " ★"
+
+                // heatmap color: relative green→red gradient; grey for ineligible
+                color _bg = na
+                color _tc = na
+                if not _eligible
+                    _bg := color.new(color.gray, 60)
+                    _tc := color.new(color.gray, 20)
+                else if na(_v)
+                    _bg := color.new(color.gray, 60)
+                    _tc := color.new(color.gray, 20)
+                else
+                    // normalise 0→1 (best=1, worst=0)
+                    float _norm = (_v - _grid_min) / _range
+                    // blend: green (0,255,0) at norm=1, red (255,0,0) at norm=0
+                    int _r_ch = int(255 * (1.0 - _norm))
+                    int _g_ch = int(255 * _norm)
+                    _bg := color.rgb(_r_ch, _g_ch, 0, 30)
+                    _tc := color.white
+
+                table.cell(opt_tbl, c, r, _tx, text_size=size.tiny, text_color=_tc, bgcolor=_bg)
 
 // Remove the optimizer table when the toggle is switched OFF
 if not i_optimize and not na(opt_tbl)

@@ -640,6 +640,9 @@ bool  vol_spike = volume > vol_avg
 bgcolor(i_show_volume and not day_complete and (buy_signal or sell_signal) and vol_spike
     ? color.new(i_col_vol_hi, 75) : na)
 
+// Dim the chart background when the optimizer table is open to reduce visual clutter
+bgcolor(i_optimize ? color.new(color.black, 70) : na)
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  SL/TP OPTIMIZER  (advisory grid — gated on i_optimize; NEVER changes trades)
 //  Tests every SL×TP multiple combo (SL 0.2→3.0, TP 0.2→5.0, step 0.2 = 15×25)
@@ -679,7 +682,7 @@ if i_optimize
     // Create the table ONCE (never delete+recreate — that left it blank/gone on
     // recalcs). We only repopulate its cells on the render bar below.
     if na(opt_tbl)
-        opt_tbl := table.new(position.bottom_right, N_TP + 1, N_SL + 1,
+        opt_tbl := table.new(position.middle_center, N_TP + 1, N_SL + 1,
              border_width=1, frame_width=1, frame_color=color.gray)
     // advance any open simulated trades — fills modelled like the real engine:
     //   entry  = signal close ± slippage (market, adverse)
@@ -800,11 +803,11 @@ if i_optimize
         int    _bsl = _best_k >= 0 ? int(_best_k / N_TP) : 0
         int    _btp = _best_k >= 0 ? _best_k % N_TP      : 0
         string _hdr = "GOAL: " + i_goal + "\nBEST  SL×" + str.tostring(0.2*(_bsl+1), "#.#") + "  TP×" + str.tostring(0.2*(_btp+1), "#.#")
-        table.cell(opt_tbl, 0, 0, _hdr, text_size=size.small, text_color=color.white, bgcolor=color.new(color.blue, 0))
+        table.cell(opt_tbl, 0, 0, _hdr, text_size=size.normal, text_color=color.white, bgcolor=color.new(color.blue, 0))
         for c = 1 to N_TP
-            table.cell(opt_tbl, c, 0, "TP\n"+str.tostring(0.2*c, "#.#"), text_size=size.tiny, text_color=color.white, bgcolor=color.new(color.gray, 20))
+            table.cell(opt_tbl, c, 0, "TP\n"+str.tostring(0.2*c, "#.#"), text_size=size.small, text_color=color.white, bgcolor=color.new(color.gray, 20))
         for r = 1 to N_SL
-            table.cell(opt_tbl, 0, r, "SL "+str.tostring(0.2*r, "#.#"), text_size=size.tiny, text_color=color.white, bgcolor=color.new(color.gray, 20))
+            table.cell(opt_tbl, 0, r, "SL "+str.tostring(0.2*r, "#.#"), text_size=size.small, text_color=color.white, bgcolor=color.new(color.gray, 20))
 
         // ── Step 3: draw cells with heatmap + plateau ★ ──────────────────────────
         float _range = (_grid_max - _grid_min) > 0 ? (_grid_max - _grid_min) : 1.0
@@ -816,17 +819,17 @@ if i_optimize
                 float _v  = array.get(a_metric, _k)
                 bool  _eligible = _n >= i_min_trades and array.get(a_losses, _k) >= i_min_losses
 
-                // cell display text — two lines: metric + trade count
+                // cell display text — metric only for eligible cells; grey cells show trade count
                 string _tx = na
                 if not _eligible
                     _tx := "—\n(n=" + str.tostring(_n) + ")"
                 else
                     if i_goal == "Expectancy (R)"
-                        _tx := (not na(_v) ? str.tostring(_v, "#.##") + "R" : "—") + "\n(n=" + str.tostring(_n) + ")"
+                        _tx := not na(_v) ? str.tostring(_v, "#.##") + "R" : "—"
                     else if i_goal == "Calmar (R)"
-                        _tx := (not na(_v) ? (_v >= 1e8 ? "∞" : str.tostring(_v, "#.##")) + "R" : "—") + "\n(n=" + str.tostring(_n) + ")"
+                        _tx := not na(_v) ? (_v >= 1e8 ? "∞" : str.tostring(_v, "#.##")) + "R" : "—"
                     else
-                        _tx := (not na(_v) ? str.tostring(_v, "#.#") + "%" : "—") + "\n(n=" + str.tostring(_n) + ")"
+                        _tx := not na(_v) ? str.tostring(_v, "#.#") + "%" : "—"
 
                 // plateau detection: cell is stable if all 4 orthogonal neighbors
                 // are within 10% of its value (only for eligible cells)
@@ -864,7 +867,7 @@ if i_optimize
                     _bg := color.rgb(_r_ch, _g_ch, 0, 30)
                     _tc := color.white
 
-                table.cell(opt_tbl, c, r, _tx, text_size=size.tiny, text_color=_tc, bgcolor=_bg)
+                table.cell(opt_tbl, c, r, _tx, text_size=size.small, text_color=_tc, bgcolor=_bg)
 
 // Remove the optimizer table when the toggle is switched OFF
 if not i_optimize and not na(opt_tbl)

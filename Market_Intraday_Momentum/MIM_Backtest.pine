@@ -1,0 +1,322 @@
+//@version=6
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Market Intraday Momentum (MIM)  |  Pine Script v6  |  BACKTEST (strategy)
+//  Spec: ./CLAUDE.md  ·  Research: Gao-Han-Li-Zhou (JFE 2018), Baltussen et al. (JFE 2021)
+//
+//  WHAT: one trade/day. At the start of the final 30-min window go long/short on a
+//        signal computed earlier in the session; hold to the cash close; never overnight.
+//  CHART: run on an intraday TF that divides 30 (1/2/3/5/6/10/15/30). 1-MIN RECOMMENDED.
+//         Wrong TF -> hard runtime.error (backtest validity is sacred).
+//
+//  ── Locked design decisions (see plans/MIM_implementation.md) ────────────────
+//  • process_orders_on_close = FALSE -> entries fill at NEXT-bar open => Mode B sees
+//    zero future data. Flatten is submitted on the 2nd-to-last in-session bar so it
+//    fills at the last bar's open => provably flat daily on RTH *and* 24h charts.
+//  • Native chart-TF anchor capture via time_close (NO request.security for anchors —
+//    cross-TF security captured the prior session's range in the sibling ORB build).
+//  • request.security only for daily series (VIX / trend / ATR-TF), all [1]/[n] +
+//    lookahead_off so historical values never repaint.
+//
+//  ── 3 honest deviations from the spec (flagged, not silent) ───────────────────
+//  1. Hold ≈ 29 min on 1-min (not the "full 30" of §4): the universal early-flatten
+//     buys guaranteed no-overnight. Coarser TFs lose more of the window (use 1-min).
+//  2. Commission baked at 0.80/side (not §8's 0.50): real Tradovate MES/MNQ all-in.
+//  3. Month-end filter = (dayofmonth ≤ 3 or ≥ 26), not the literal T−3…T+3 of §7 —
+//     the "before month-end" side is unknowable live without lookahead.
+//
+//  v6 gotchas honored: commission/slippage baked as LITERALS (inputs can't go in
+//  strategy()); no `and`/`or` at line start/end (intermediate bools); explicit local
+//  types; request.security at top level; lookahead_off everywhere.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  INPUTS  (defined before strategy() so they're available at declaration)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── ⏱ Session & Time ─────────────────────────────────────────────────────────
+i_sessStart = input.int(930, "Session Open (HHMM ET)", minval=0, maxval=2359,
+     group="⏱ Session & Time",
+     tooltip="Cash-session open in America/New_York (DST auto). Index preset 930. GOLD preset: set 820. Anchors derive from this: T_OPEN30 = open+30, T_LAST30 = close−30, T_SECONDLAST = close−60.")
+i_sessEnd = input.int(1600, "Session Close (HHMM ET)", minval=0, maxval=2359,
+     group="⏱ Session & Time",
+     tooltip="Cash-session close in America/New_York. Index preset 1600. GOLD preset: set 1330 (COMEX pit close). The day's position is flattened around here, never held overnight.")
+
+// ── 🎯 Signal ─────────────────────────────────────────────────────────────────
+i_signalMode = input.string("B_RestOfDay", "Signal Mode", options=["A_FirstHalf", "B_RestOfDay"],
+     group="🎯 Signal",
+     tooltip="A = first-half-hour return (prevClose→T_OPEN30). B = rest-of-day return (prevClose→T_LAST30). B is the stronger/more robust futures signal (Baltussen). Both ENTER at the start of the final 30-min window.")
+i_useR12 = input.bool(false, "Use r12 Confirmation",
+     group="🎯 Signal",
+     tooltip="Require the 2nd-to-last half-hour (T_SECONDLAST→T_LAST30, the Gao-Han 'r12') to AGREE with the main signal, else block the trade. Strictly reduces trade count. Only knowable at T_LAST30, so it defers the decision to then.")
+i_dirMode = input.string("Both", "Direction Mode", options=["Both", "LongOnly", "ShortOnly"],
+     group="🎯 Signal",
+     tooltip="Both / LongOnly / ShortOnly. Longs are structurally cleaner here (overnight drift gives index futures a long bias); LongOnly may smooth a prop equity curve at the cost of ~half the trades.")
+
+// ── 🛑 Stops  (both can be on; the TIGHTER governs) ──────────────────────────
+i_useAtrStop = input.bool(false, "Use ATR Stop", group="🛑 Stops",
+     tooltip="Stop distance = atrMult × ATR(atrLength @ atrTimeframe). Uses the prior completed higher-TF ATR ([1] + lookahead_off).")
+i_atrTF = input.string("30", "ATR Timeframe (min)", group="🛑 Stops",
+     tooltip="Higher-TF ATR source for the stop. Default 30 = 30-minute ATR.")
+i_atrLen = input.int(14, "ATR Length", minval=1, group="🛑 Stops")
+i_atrMult = input.float(2.0, "ATR Mult", minval=0.1, step=0.1, group="🛑 Stops")
+i_useTickStop = input.bool(false, "Use Fixed-Tick Stop", group="🛑 Stops",
+     tooltip="Stop distance = fixedTicks × syminfo.mintick. Suggested starting points (NOT optimized): ES/MES 32, NQ/MNQ 80, YM/MYM 40, GC/MGC 50.")
+i_fixedTicks = input.int(40, "Fixed Ticks", minval=1, group="🛑 Stops",
+     tooltip="Override per instrument. ES/MES≈32 · NQ/MNQ≈80 · YM/MYM≈40 · GC/MGC≈50. Multiplied by syminfo.mintick so it's symbol-agnostic.")
+
+// ── 📦 Sizing ────────────────────────────────────────────────────────────────
+i_sizingMode = input.string("Fixed", "Sizing Mode", options=["Fixed", "RiskBased"],
+     group="📦 Sizing",
+     tooltip="Fixed = qtyFixed contracts. RiskBased = floor(riskDollars / (stopDist × pointvalue)), capped at maxContracts. RiskBased REQUIRES a stop; with none it falls back to qtyFixed and warns.")
+i_qtyFixed = input.int(1, "Fixed Qty (contracts)", minval=1, group="📦 Sizing")
+i_riskDollars = input.float(200, "Risk $ per trade", minval=1, group="📦 Sizing",
+     tooltip="RiskBased only. Prop tip: ~8% of your trailing-drawdown buffer (≈$200 on a 50K Apex account).")
+i_maxContracts = input.int(10, "Max Contracts", minval=1, group="📦 Sizing")
+
+// ── 🔬 Filters  (all default OFF -> baseline = academic every-signal-day) ─────
+i_useVolFilter = input.bool(false, "Use Volatility Filter", group="🔬 Filters",
+     tooltip="The single biggest expectancy lever in the research (R²≈0.6% low-vol vs 3.3% high-vol days). Take the trade only if today's opening 30-min ATR%-of-price (measured at T_OPEN30) ≥ the volPercentile-th percentile of the PRIOR volLookbackDays days (today excluded -> no lookahead).")
+i_volLookback = input.int(60, "Vol Lookback (days)", minval=5, group="🔬 Filters")
+i_volPctile = input.float(50, "Vol Percentile", minval=0, maxval=100, step=1, group="🔬 Filters",
+     tooltip="Raise toward ~66 for top-tercile (high-vol-only) behavior.")
+i_useVixGate = input.bool(false, "Use VIX Gate", group="🔬 Filters",
+     tooltip="Take the trade only if prior daily VIX close ≥ threshold. GOLD caveat: VIX is an equity measure — for MGC/GC set the symbol to CBOE:GVZ (gold VIX) or leave this OFF.")
+i_vixSym = input.string("CBOE:VIX", "VIX Symbol", group="🔬 Filters",
+     tooltip="CBOE:VIX for index instruments. For gold use CBOE:GVZ. The ATR-percentile filter is the cross-instrument one.")
+i_vixThresh = input.float(18, "VIX Threshold", minval=0, step=0.5, group="🔬 Filters")
+i_useMonthEnd = input.bool(false, "Use Month-End Exclusion", group="🔬 Filters",
+     tooltip="Gao-Han: predictability weaker ±3 trading days around month-end. APPROXIMATION (no-lookahead): skip if dayofmonth ≤ 3 or ≥ 26. The literal T−3…T+3 'before' side needs future knowledge.")
+i_useTrend = input.bool(false, "Use Trend Filter (Strategy 3)", group="🔬 Filters",
+     tooltip="Time-Series Momentum overlay (Moskowitz-Ooi-Pedersen, JFE 2012). A 'direction permission slip': permits longs only in an up year, shorts only in a down year; zeroes counter-trend signals. Creates no trades of its own. Helps most on gold; choppier on index micros.")
+i_trendLookback = input.int(252, "Trend Lookback (days)", minval=20, group="🔬 Filters",
+     tooltip="Trading days for the yearly trend sign. 252 ≈ one year. trendDir = sign(close / dailyClose[lookback] − 1). Flat year (0) blocks for safety.")
+
+// ── ⚙️ Backtest Realism  (LITERALS below are what actually apply; see note) ──
+i_commission = input.float(0.80, "Commission Per Side ($) — display ref", minval=0, step=0.01,
+     group="⚙️ Backtest Realism",
+     tooltip="DISPLAY REFERENCE ONLY. The LIVE value is baked into strategy(commission_value=0.80) — v6 forbids inputs there. 0.80/side ≈ Tradovate MES/MNQ all-in. Prop firms differ — match yours in Properties → Commission, then reset to Defaults to apply.")
+i_slippage = input.int(1, "Slippage (ticks) — display ref", minval=0,
+     group="⚙️ Backtest Realism",
+     tooltip="DISPLAY REFERENCE ONLY. Live value baked into strategy(slippage=1). Override in Properties → Slippage if needed.")
+
+// ── 👁 Debug / Visuals ───────────────────────────────────────────────────────
+i_showDebug = input.bool(false, "Show Debug Table", group="👁 Debug / Visuals",
+     tooltip="On-chart table of today's r_firstHalf / r_restOfDay / r_secondLast / tradeDir / qty / projected stop.")
+i_showSession = input.bool(true, "Show Session Markers", group="👁 Debug / Visuals",
+     tooltip="Tint the final 30-min window and mark the anchor bars.")
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  STRATEGY DECLARATION  (commission/slippage/capital/margin baked as LITERALS)
+// ─────────────────────────────────────────────────────────────────────────────
+strategy("MIM Backtest", overlay=true, calc_on_every_tick=false,
+     process_orders_on_close=false, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     initial_capital=50000,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.80,
+     slippage=1, margin_long=5, margin_short=5,
+     max_bars_back=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TIMEFRAME GUARD  (hard fail-loud on a TF that can't host the anchors)
+// ─────────────────────────────────────────────────────────────────────────────
+string TZ = "America/New_York"
+int tfMin = math.round(timeframe.in_seconds() / 60)
+bool tfDivides30 = timeframe.isintraday and tfMin >= 1 and (30 % tfMin == 0)
+if not tfDivides30
+    runtime.error("MIM: use an intraday timeframe that divides 30 (1/2/3/5/6/10/15/30 min). 1-min recommended. Current: " + timeframe.period)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TIME LAYER  (open-time + close-time wall clocks, anchor minutes-of-day)
+// ─────────────────────────────────────────────────────────────────────────────
+int ct_min = hour(time_close, TZ) * 60 + minute(time_close, TZ)   // bar CLOSE minute-of-day
+
+int sessOpenMin  = (i_sessStart / 100) * 60 + (i_sessStart % 100)
+int sessCloseMin = (i_sessEnd   / 100) * 60 + (i_sessEnd   % 100)
+int tOpen30Min   = sessOpenMin  + 30
+int tSecondMin   = sessCloseMin - 60
+int tLast30Min   = sessCloseMin - 30
+
+bool inSession      = ct_min > sessOpenMin and ct_min <= sessCloseMin
+bool firstInSession = inSession and not inSession[1]
+
+bool atOpen30 = inSession and ct_min == tOpen30Min
+bool atSecond = inSession and ct_min == tSecondMin
+bool atLast30 = inSession and ct_min == tLast30Min
+bool atClose  = inSession and ct_min == sessCloseMin
+
+// The early-flatten bar: 2nd-to-last in-session bar -> close order fills at the last
+// bar's OPEN => flat for the final bar, no overnight on RTH or 24h charts.
+int flattenMin = sessCloseMin - tfMin
+bool flattenBar = inSession and ct_min == flattenMin
+// At least one bar of hold must exist after entry (false only on 30-min where the
+// final window is a single bar -> trades suppressed to avoid zero-hold churn).
+bool windowOK = flattenMin > tLast30Min
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ANCHOR PRICE CAPTURE  (native; price AT an anchor = close of the bar closing there)
+// ─────────────────────────────────────────────────────────────────────────────
+var float P_prevClose  = na   // prior session's close (carries the overnight gap)
+var float P_open30     = na
+var float P_secondLast = na
+var float P_last30     = na
+var float P_todayClose = na   // running session close -> becomes prevClose next session
+var bool  tradedToday  = false
+
+if firstInSession
+    P_prevClose := P_todayClose
+    P_open30    := na
+    P_secondLast := na
+    P_last30    := na
+    tradedToday := false
+
+if atOpen30
+    P_open30 := close
+if atSecond
+    P_secondLast := close
+if atLast30
+    P_last30 := close
+if atClose
+    P_todayClose := close
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  THE THREE RETURNS  (each non-na the moment its anchors are known)
+// ─────────────────────────────────────────────────────────────────────────────
+bool haveFH = not na(P_open30)  and not na(P_prevClose)
+bool haveRD = not na(P_last30)  and not na(P_prevClose)
+bool haveSL = not na(P_last30)  and not na(P_secondLast)
+float r_firstHalf  = haveFH ? P_open30 / P_prevClose  - 1 : na
+float r_restOfDay  = haveRD ? P_last30 / P_prevClose  - 1 : na
+float r_secondLast = haveSL ? P_last30 / P_secondLast - 1 : na
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  DAILY SERIES  (request.security at top level; [1]/[n] + lookahead_off => no repaint)
+// ─────────────────────────────────────────────────────────────────────────────
+float atr_value = request.security(syminfo.tickerid, i_atrTF, ta.atr(i_atrLen)[1], lookahead=barmerge.lookahead_off)
+float vixClose  = request.security(i_vixSym, "D", close[1], lookahead=barmerge.lookahead_off)
+float yearAgo   = request.security(syminfo.tickerid, "D", close[i_trendLookback], lookahead=barmerge.lookahead_off)
+int   trendDir  = na(yearAgo) or yearAgo == 0 ? 0 : int(math.sign(close / yearAgo - 1))
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  VOLATILITY FILTER  (native daily-sampled percentile; today excluded => no lookahead)
+// ─────────────────────────────────────────────────────────────────────────────
+var array<float> volHist = array.new<float>()
+var bool volPass = true
+if atOpen30
+    float proxy = na(atr_value) or close == 0 ? na : atr_value / close * 100.0
+    float thresh = array.size(volHist) >= 1 ? array.percentile_linear_interpolation(volHist, i_volPctile) : na
+    volPass := na(thresh) or na(proxy) ? true : proxy >= thresh
+    if not na(proxy)
+        array.push(volHist, proxy)
+        if array.size(volHist) > i_volLookback
+            array.shift(volHist)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  SIGNAL CONSTRUCTION  (all gate inputs are known by the T_LAST30 entry bar)
+// ─────────────────────────────────────────────────────────────────────────────
+bool  modeA   = i_signalMode == "A_FirstHalf"
+float mainRet = modeA ? r_firstHalf : r_restOfDay
+int   rawDir  = na(mainRet) ? 0 : int(math.sign(mainRet))
+
+int  r12sign   = na(r_secondLast) ? 0 : int(math.sign(r_secondLast))
+bool r12block  = i_useR12 and r12sign != rawDir
+bool trendBlock = i_useTrend and rawDir != trendDir
+bool dirBlockL = i_dirMode == "ShortOnly" and rawDir == 1
+bool dirBlockS = i_dirMode == "LongOnly"  and rawDir == -1
+bool dirBlock  = dirBlockL or dirBlockS
+bool volBlock  = i_useVolFilter and not volPass
+bool vixOk     = not na(vixClose) and vixClose >= i_vixThresh
+bool vixBlock  = i_useVixGate and not vixOk
+int  dom       = dayofmonth(time, TZ)
+bool monthBlock = i_useMonthEnd and (dom <= 3 or dom >= 26)
+
+bool blocked  = rawDir == 0 or r12block or trendBlock or dirBlock or volBlock or vixBlock or monthBlock
+int  tradeDir = blocked ? 0 : rawDir
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  STOP DISTANCE  (tighter of the two enabled stops) + POSITION SIZING
+// ─────────────────────────────────────────────────────────────────────────────
+float stopDist = na
+if i_useAtrStop and not na(atr_value)
+    float d = i_atrMult * atr_value
+    stopDist := na(stopDist) ? d : math.min(stopDist, d)
+if i_useTickStop
+    float d = i_fixedTicks * syminfo.mintick
+    stopDist := na(stopDist) ? d : math.min(stopDist, d)
+bool hasStop = not na(stopDist) and stopDist > 0
+
+float qty = i_qtyFixed
+bool riskWarn = false
+if i_sizingMode == "RiskBased"
+    if hasStop
+        float perContract = stopDist * syminfo.pointvalue
+        float rawQty = perContract > 0 ? math.floor(i_riskDollars / perContract) : 0
+        float capQty = math.min(rawQty, i_maxContracts)
+        qty := capQty < 1 ? 0 : capQty
+    else
+        qty := i_qtyFixed
+        riskWarn := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ENTRY  (submit at the T_LAST30 bar -> POOC=false fills the NEXT bar's open)
+// ─────────────────────────────────────────────────────────────────────────────
+var int   heldDir      = 0
+var float heldStopDist = na
+
+bool entryBar = atLast30 and windowOK and not tradedToday and tradeDir != 0
+if entryBar
+    tradedToday := true
+    if qty >= 1
+        if tradeDir == 1
+            strategy.entry("MIM_L", strategy.long, qty=qty)
+        else
+            strategy.entry("MIM_S", strategy.short, qty=qty)
+        heldDir      := tradeDir
+        heldStopDist := stopDist
+
+// ── Stop placement: once the position actually opens, anchor the stop to the fill ──
+bool justEntered = strategy.position_size != 0 and strategy.position_size[1] == 0
+if justEntered and not na(heldStopDist) and heldStopDist > 0
+    float ep = strategy.position_avg_price
+    float sp = heldDir == 1 ? ep - heldStopDist : ep + heldStopDist
+    strategy.exit("MIM_X", from_entry = heldDir == 1 ? "MIM_L" : "MIM_S", stop=sp)
+
+// ── Session-close flatten (submitted 1 bar early -> fills at last bar's open) ──
+if flattenBar and strategy.position_size != 0
+    strategy.close_all(comment="EOD flat")
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+bool inFinalWindow = inSession and ct_min > tLast30Min
+bgcolor(i_showSession and inFinalWindow ? color.new(color.teal, 88) : na, title="Final 30-min window")
+plotchar(i_showSession and atOpen30 ? close : na, "T_OPEN30", "◆", location.belowbar, color.new(color.gray, 0), size=size.tiny)
+plotchar(i_showSession and atSecond ? close : na, "T_SECONDLAST", "·", location.abovebar, color.new(color.gray, 30), size=size.tiny)
+plotchar(i_showSession and atLast30 ? close : na, "T_LAST30", "▲", location.belowbar, color.new(color.blue, 0), size=size.tiny)
+
+if riskWarn and barstate.islast
+    label.new(bar_index, high, "RiskBased sizing requires a stop; using fixed qty.",
+         style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.small)
+
+if not windowOK and barstate.islast
+    label.new(bar_index, high, "TF too coarse for a final-window hold — trades suppressed. Use ≤15-min (1-min recommended).",
+         style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// ── Debug table ──────────────────────────────────────────────────────────────
+var table dbg = table.new(position.top_right, 2, 7, border_width=1)
+if i_showDebug and barstate.islast
+    float projStop = hasStop and tradeDir != 0 ? (tradeDir == 1 ? close - stopDist : close + stopDist) : na
+    table.cell(dbg, 0, 0, "MIM debug", text_color=color.white, bgcolor=color.new(color.blue, 0))
+    table.cell(dbg, 1, 0, i_signalMode, text_color=color.white, bgcolor=color.new(color.blue, 0))
+    table.cell(dbg, 0, 1, "r_firstHalf", text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(dbg, 1, 1, str.tostring(r_firstHalf * 100, "#.###") + "%", text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(dbg, 0, 2, "r_restOfDay", text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(dbg, 1, 2, str.tostring(r_restOfDay * 100, "#.###") + "%", text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(dbg, 0, 3, "r_secondLast", text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(dbg, 1, 3, str.tostring(r_secondLast * 100, "#.###") + "%", text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(dbg, 0, 4, "tradeDir", text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(dbg, 1, 4, tradeDir == 1 ? "LONG" : tradeDir == -1 ? "SHORT" : "flat", text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(dbg, 0, 5, "qty", text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(dbg, 1, 5, str.tostring(qty, "#.##"), text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(dbg, 0, 6, "proj stop", text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(dbg, 1, 6, na(projStop) ? "—" : str.tostring(projStop, format.mintick), text_color=color.white, bgcolor=color.new(color.gray, 20))

@@ -1,0 +1,199 @@
+//@version=6
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Market Intraday Momentum (MIM)  |  Pine Script v6  |  LIVE ALERTS (indicator)
+//  Spec: ./CLAUDE.md  ·  Sister script: MIM_Backtest.pine (identical SIGNAL core)
+//
+//  This is the discretionary / notification layer. It carries the SAME §1–§4, §7
+//  signal logic as the backtest — anchors, three returns, all gates — but NO
+//  strategy.* calls, sizing, stops, or commission. It only tells you DIRECTION and
+//  the entry moment at the start of the last 30-minute window, plus an exit ping.
+//
+//  TIMING NOTE (carry into your bot): for Mode B and any time r12 is on, the signal
+//  is only knowable at the T_LAST30 CLOSE (signal completion). So the actionable
+//  ENTRY alert fires on the confirmed T_LAST30 bar — that is the earliest honest
+//  moment. The backtest then fills the *next* bar's open; a discretionary trader
+//  acts at/after this alert.
+//
+//  CHART: intraday TF dividing 30 (1/2/3/5/6/10/15/30). 1-MIN RECOMMENDED. Wrong TF
+//  -> hard runtime.error (kept identical to the backtest for parity).
+//  Alerts fire on CONFIRMED bars only (barstate.isconfirmed) — no repaint.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  INPUTS  (signal-affecting subset only — mirror of the backtest's §1/§3/§7)
+// ─────────────────────────────────────────────────────────────────────────────
+i_sessStart = input.int(930, "Session Open (HHMM ET)", minval=0, maxval=2359,
+     group="⏱ Session & Time",
+     tooltip="Cash-session open in America/New_York (DST auto). Index 930. GOLD: 820.")
+i_sessEnd = input.int(1600, "Session Close (HHMM ET)", minval=0, maxval=2359,
+     group="⏱ Session & Time",
+     tooltip="Cash-session close in America/New_York. Index 1600. GOLD: 1330.")
+
+i_signalMode = input.string("B_RestOfDay", "Signal Mode", options=["A_FirstHalf", "B_RestOfDay"],
+     group="🎯 Signal",
+     tooltip="A = first-half-hour (prevClose→T_OPEN30). B = rest-of-day (prevClose→T_LAST30). Both alert at the start of the final window; B/r12 are only accurate at T_LAST30 close.")
+i_useR12 = input.bool(false, "Use r12 Confirmation", group="🎯 Signal",
+     tooltip="Require the 2nd-to-last half-hour to agree, else no alert. Defers the decision to T_LAST30.")
+i_dirMode = input.string("Both", "Direction Mode", options=["Both", "LongOnly", "ShortOnly"], group="🎯 Signal")
+
+i_useVolFilter = input.bool(false, "Use Volatility Filter", group="🔬 Filters",
+     tooltip="Alert only if today's opening 30-min ATR%-of-price (at T_OPEN30) ≥ the volPercentile-th percentile of the prior volLookbackDays days (today excluded).")
+i_atrTF = input.string("30", "ATR Timeframe (min)", group="🔬 Filters", tooltip="Vol-proxy ATR source. Default 30-min.")
+i_atrLen = input.int(14, "ATR Length", minval=1, group="🔬 Filters")
+i_volLookback = input.int(60, "Vol Lookback (days)", minval=5, group="🔬 Filters")
+i_volPctile = input.float(50, "Vol Percentile", minval=0, maxval=100, step=1, group="🔬 Filters",
+     tooltip="Raise toward ~66 for top-tercile (high-vol-only) behavior.")
+i_useVixGate = input.bool(false, "Use VIX Gate", group="🔬 Filters",
+     tooltip="Alert only if prior daily VIX close ≥ threshold. GOLD: set symbol to CBOE:GVZ or leave OFF.")
+i_vixSym = input.string("CBOE:VIX", "VIX Symbol", group="🔬 Filters", tooltip="CBOE:VIX (index) · CBOE:GVZ (gold).")
+i_vixThresh = input.float(18, "VIX Threshold", minval=0, step=0.5, group="🔬 Filters")
+i_useMonthEnd = input.bool(false, "Use Month-End Exclusion", group="🔬 Filters",
+     tooltip="No-lookahead approximation of Gao-Han's ±3-day month-end skip: skip if dayofmonth ≤ 3 or ≥ 26.")
+i_useTrend = input.bool(false, "Use Trend Filter (Strategy 3)", group="🔬 Filters",
+     tooltip="Permit longs only in an up year, shorts only in a down year (Moskowitz-Ooi-Pedersen). Zeroes counter-trend signals.")
+i_trendLookback = input.int(252, "Trend Lookback (days)", minval=20, group="🔬 Filters")
+
+i_showSession = input.bool(true, "Show Session Markers", group="👁 Visuals")
+
+indicator("MIM Alerts", overlay=true, max_labels_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TIMEFRAME GUARD  (identical to backtest)
+// ─────────────────────────────────────────────────────────────────────────────
+string TZ = "America/New_York"
+int tfMin = math.round(timeframe.in_seconds() / 60)
+bool tfDivides30 = timeframe.isintraday and tfMin >= 1 and (30 % tfMin == 0)
+if not tfDivides30
+    runtime.error("MIM: use an intraday timeframe that divides 30 (1/2/3/5/6/10/15/30 min). 1-min recommended. Current: " + timeframe.period)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TIME LAYER  (identical to backtest)
+// ─────────────────────────────────────────────────────────────────────────────
+int ct_min = hour(time_close, TZ) * 60 + minute(time_close, TZ)
+int sessOpenMin  = (i_sessStart / 100) * 60 + (i_sessStart % 100)
+int sessCloseMin = (i_sessEnd   / 100) * 60 + (i_sessEnd   % 100)
+int tOpen30Min   = sessOpenMin  + 30
+int tSecondMin   = sessCloseMin - 60
+int tLast30Min   = sessCloseMin - 30
+
+bool inSession      = ct_min > sessOpenMin and ct_min <= sessCloseMin
+bool firstInSession = inSession and not inSession[1]
+bool atOpen30 = inSession and ct_min == tOpen30Min
+bool atSecond = inSession and ct_min == tSecondMin
+bool atLast30 = inSession and ct_min == tLast30Min
+bool atClose  = inSession and ct_min == sessCloseMin
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ANCHOR PRICE CAPTURE  (identical to backtest)
+// ─────────────────────────────────────────────────────────────────────────────
+var float P_prevClose  = na
+var float P_open30     = na
+var float P_secondLast = na
+var float P_last30     = na
+var float P_todayClose = na
+var bool  firedToday   = false
+
+if firstInSession
+    P_prevClose := P_todayClose
+    P_open30    := na
+    P_secondLast := na
+    P_last30    := na
+    firedToday  := false
+
+if atOpen30
+    P_open30 := close
+if atSecond
+    P_secondLast := close
+if atLast30
+    P_last30 := close
+if atClose
+    P_todayClose := close
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  THE THREE RETURNS  (identical to backtest)
+// ─────────────────────────────────────────────────────────────────────────────
+bool haveFH = not na(P_open30)  and not na(P_prevClose)
+bool haveRD = not na(P_last30)  and not na(P_prevClose)
+bool haveSL = not na(P_last30)  and not na(P_secondLast)
+float r_firstHalf  = haveFH ? P_open30 / P_prevClose  - 1 : na
+float r_restOfDay  = haveRD ? P_last30 / P_prevClose  - 1 : na
+float r_secondLast = haveSL ? P_last30 / P_secondLast - 1 : na
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  DAILY SERIES  (identical to backtest)
+// ─────────────────────────────────────────────────────────────────────────────
+float atr_value = request.security(syminfo.tickerid, i_atrTF, ta.atr(i_atrLen)[1], lookahead=barmerge.lookahead_off)
+float vixClose  = request.security(i_vixSym, "D", close[1], lookahead=barmerge.lookahead_off)
+float yearAgo   = request.security(syminfo.tickerid, "D", close[i_trendLookback], lookahead=barmerge.lookahead_off)
+int   trendDir  = na(yearAgo) or yearAgo == 0 ? 0 : int(math.sign(close / yearAgo - 1))
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  VOLATILITY FILTER  (identical to backtest)
+// ─────────────────────────────────────────────────────────────────────────────
+var array<float> volHist = array.new<float>()
+var bool volPass = true
+if atOpen30
+    float proxy = na(atr_value) or close == 0 ? na : atr_value / close * 100.0
+    float thresh = array.size(volHist) >= 1 ? array.percentile_linear_interpolation(volHist, i_volPctile) : na
+    volPass := na(thresh) or na(proxy) ? true : proxy >= thresh
+    if not na(proxy)
+        array.push(volHist, proxy)
+        if array.size(volHist) > i_volLookback
+            array.shift(volHist)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  SIGNAL CONSTRUCTION  (identical to backtest)
+// ─────────────────────────────────────────────────────────────────────────────
+bool  modeA   = i_signalMode == "A_FirstHalf"
+float mainRet = modeA ? r_firstHalf : r_restOfDay
+int   rawDir  = na(mainRet) ? 0 : int(math.sign(mainRet))
+
+int  r12sign   = na(r_secondLast) ? 0 : int(math.sign(r_secondLast))
+bool r12block  = i_useR12 and r12sign != rawDir
+bool trendBlock = i_useTrend and rawDir != trendDir
+bool dirBlockL = i_dirMode == "ShortOnly" and rawDir == 1
+bool dirBlockS = i_dirMode == "LongOnly"  and rawDir == -1
+bool dirBlock  = dirBlockL or dirBlockS
+bool volBlock  = i_useVolFilter and not volPass
+bool vixOk     = not na(vixClose) and vixClose >= i_vixThresh
+bool vixBlock  = i_useVixGate and not vixOk
+int  dom       = dayofmonth(time, TZ)
+bool monthBlock = i_useMonthEnd and (dom <= 3 or dom >= 26)
+
+bool blocked  = rawDir == 0 or r12block or trendBlock or dirBlock or volBlock or vixBlock or monthBlock
+int  tradeDir = blocked ? 0 : rawDir
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ALERT TRIGGERS  (entry at confirmed T_LAST30 bar; exit at confirmed close)
+// ─────────────────────────────────────────────────────────────────────────────
+bool entryDecision = atLast30 and not firedToday and tradeDir != 0
+bool longEntrySig  = entryDecision and tradeDir == 1
+bool shortEntrySig = entryDecision and tradeDir == -1
+bool exitSig       = atClose
+
+if entryDecision and barstate.isconfirmed
+    firedToday := true
+
+// Structured, parseable message for a downstream webhook/bot (keys stable — see spec §8).
+string modeStr = modeA ? "A" : "B"
+if longEntrySig and barstate.isconfirmed
+    alert('{"strat":"MIM","sym":"' + syminfo.ticker + '","mode":"' + modeStr + '","dir":"LONG","px":' + str.tostring(close) + ',"t":"' + str.tostring(time) + '"}', alert.freq_once_per_bar)
+if shortEntrySig and barstate.isconfirmed
+    alert('{"strat":"MIM","sym":"' + syminfo.ticker + '","mode":"' + modeStr + '","dir":"SHORT","px":' + str.tostring(close) + ',"t":"' + str.tostring(time) + '"}', alert.freq_once_per_bar)
+if exitSig and barstate.isconfirmed
+    alert('{"strat":"MIM","sym":"' + syminfo.ticker + '","mode":"' + modeStr + '","dir":"EXIT","px":' + str.tostring(close) + ',"t":"' + str.tostring(time) + '"}', alert.freq_once_per_bar)
+
+// alertcondition() options for the TradingView alert dialog (static {{placeholders}}).
+alertcondition(longEntrySig,  "MIM Long Entry",  '{"strat":"MIM","sym":"{{ticker}}","dir":"LONG","px":{{close}},"t":"{{time}}"}')
+alertcondition(shortEntrySig, "MIM Short Entry", '{"strat":"MIM","sym":"{{ticker}}","dir":"SHORT","px":{{close}},"t":"{{time}}"}')
+alertcondition(exitSig,       "MIM Exit",        '{"strat":"MIM","sym":"{{ticker}}","dir":"EXIT","px":{{close}},"t":"{{time}}"}')
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  VISUALS  (entry/exit markers + final-window tint)
+// ─────────────────────────────────────────────────────────────────────────────
+bool inFinalWindow = inSession and ct_min > tLast30Min
+bgcolor(i_showSession and inFinalWindow ? color.new(color.teal, 90) : na, title="Final 30-min window")
+plotshape(longEntrySig,  "Long entry",  shape.triangleup,   location.belowbar, color.new(color.green, 0), text="MIM L", size=size.small)
+plotshape(shortEntrySig, "Short entry", shape.triangledown, location.abovebar, color.new(color.red, 0),   text="MIM S", size=size.small)
+plotshape(exitSig,       "Exit",        shape.xcross,       location.abovebar, color.new(color.gray, 0),  text="flat",  size=size.tiny)
